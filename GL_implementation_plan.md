@@ -59,8 +59,8 @@ This plan breaks the GL build into phases. Each phase produces a working, testab
 
 **Tasks:**
 
-1. Detect whether the Graphite CLI (`gt`) is available on PATH. If so, invoke `gt log short` and `gt branch info` to discover stack structure: which branches belong to which stacks, and their ordering.
-2. Parse the CLI output into a stack model: a list of stacks, each containing an ordered list of branches (base to tip).
+1. Detect whether the Graphite CLI (`gt`) is available on PATH. If so, invoke `gt log short` to discover stack structure and infer parent relationships from that single snapshot rather than shelling out once per branch.
+2. Parse the CLI output into a stack model: a list of stacks, each containing an ordered list of branches (base to tip). Preserve a fast first-frame paint by keeping stack detection on a bounded startup path and deferring any non-essential enrichment to background work.
 3. Update the Branch List renderer to group branches by stack with visual indentation and connecting border lines. Stack headers show the stack name. Standalone branches appear in a separate section below.
 4. Add the `⚠` stale indicator: compare each branch's merge-base with its parent branch to detect divergence.
 5. Wire up `J`/`K` in Branch List to jump between stack groups.

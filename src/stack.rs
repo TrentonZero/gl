@@ -1,10 +1,25 @@
+use crate::git::RepoState;
+use crate::perf;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::env;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-#[derive(Debug, Clone)]
+const STACK_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedBranchLine {
+    name: String,
+    depth: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackInfo {
     pub stacks: Vec<Stack>,
     #[allow(dead_code)]
@@ -13,10 +28,24 @@ pub struct StackInfo {
     pub(crate) stale_branches: HashSet<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stack {
     pub name: String,
     pub branches: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StackCacheEntry {
+    version: u32,
+    signature: String,
+    stack_info: CachedStackInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedStackInfo {
+    stacks: Vec<Stack>,
+    standalone: Vec<String>,
+    branch_to_parent: HashMap<String, String>,
 }
 
 impl StackInfo {
@@ -41,44 +70,59 @@ impl StackInfo {
     }
 }
 
-pub fn detect_stacks(root: &Path) -> StackInfo {
+pub fn detect_stacks(root: &Path, repo: &RepoState, allow_cache: bool) -> StackInfo {
+    let _timer = perf::ScopeTimer::new("detect_stacks");
+    let signature = stack_cache_signature(repo);
+
+    if allow_cache {
+        if let Some(cached) = load_stack_cache(root, &signature) {
+            perf::log("stack cache hit");
+            return cached;
+        }
+        perf::log("stack cache miss");
+    } else {
+        perf::log("stack cache bypassed");
+    }
+
     let output = match gt_log_short(root) {
         Some(output) => output,
         None => return StackInfo::empty(),
     };
 
-    let branches = parse_branch_names(&output);
-    if branches.is_empty() {
+    let parsed = parse_gt_log_short(&output);
+    if parsed.is_empty() {
         return StackInfo::empty();
     }
 
-    let branch_to_parent = load_branch_parents(root.to_path_buf(), branches.clone());
+    let branches: Vec<String> = parsed.iter().map(|line| line.name.clone()).collect();
+    let branch_to_parent = infer_branch_parents_from_gt_log(&parsed);
     if branch_to_parent.is_empty() {
         return build_stacks_from_order(&branches);
     }
 
-    build_stacks_from_parents(&branches, &branch_to_parent)
+    let stack_info = build_stacks_from_parents(&branches, &branch_to_parent);
+    write_stack_cache(root, &signature, &stack_info);
+    stack_info
 }
 
 pub fn enrich_stacks(root: &Path, stack_info: &StackInfo) -> StackInfo {
-    if stack_info.stacks.is_empty() {
+    let _timer = perf::ScopeTimer::new(format!(
+        "enrich_stacks stacks={} parents={}",
+        stack_info.stacks.len(),
+        stack_info.branch_to_parent.len()
+    ));
+    if stack_info.stacks.is_empty() || stack_info.branch_to_parent.is_empty() {
         return stack_info.clone();
     }
 
-    let branches: Vec<String> = stack_info
-        .stacks
-        .iter()
-        .flat_map(|stack| stack.branches.iter().cloned())
-        .collect();
-    let branch_to_parent = load_branch_parents(root.to_path_buf(), branches);
-
     let mut enriched = stack_info.clone();
-    enriched.branch_to_parent = branch_to_parent.clone();
-    enriched.stale_branches = compute_stale_branches(root.to_path_buf(), branch_to_parent);
+    enriched.stale_branches =
+        compute_stale_branches(root.to_path_buf(), stack_info.branch_to_parent.clone());
     enriched
 }
 
 fn gt_log_short(root: &Path) -> Option<String> {
+    let _timer = perf::ScopeTimer::new("gt log short");
     let output = Command::new("gt")
         .args(["log", "short", "--no-interactive"])
         .current_dir(root)
@@ -92,68 +136,129 @@ fn gt_log_short(root: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn gt_branch_parent(root: &Path, branch: &str) -> Option<String> {
-    let output = Command::new("gt")
-        .args(["branch", "info", branch, "--no-interactive"])
-        .current_dir(root)
-        .output()
-        .ok()?;
+fn stack_cache_signature(repo: &RepoState) -> String {
+    let mut hasher = DefaultHasher::new();
+    STACK_CACHE_VERSION.hash(&mut hasher);
+    repo.root.hash(&mut hasher);
+    for branch in &repo.branches {
+        branch.name.hash(&mut hasher);
+        branch.is_head.hash(&mut hasher);
+        branch.object_id.hash(&mut hasher);
+        branch.upstream.hash(&mut hasher);
+        branch.base_ref.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
 
-    if !output.status.success() {
+fn load_stack_cache(root: &Path, signature: &str) -> Option<StackInfo> {
+    let path = stack_cache_path(root)?;
+    let contents = fs::read_to_string(path).ok()?;
+    let entry: StackCacheEntry = toml::from_str(&contents).ok()?;
+    if entry.version != STACK_CACHE_VERSION || entry.signature != signature {
         return None;
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    // gt branch info shows parent in the output, look for "Parent" line
-    // or we can infer from gt log structure
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Parent:") {
-            return Some(rest.trim().to_string());
-        }
-        if let Some(rest) = trimmed.strip_prefix("parent:") {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
+    Some(StackInfo {
+        stacks: entry.stack_info.stacks,
+        standalone: entry.stack_info.standalone,
+        branch_to_parent: entry.stack_info.branch_to_parent,
+        stale_branches: HashSet::new(),
+    })
 }
 
-fn load_branch_parents(root: PathBuf, branches: Vec<String>) -> HashMap<String, String> {
-    let mut branch_to_parent = HashMap::new();
-    for (branch, parent) in run_in_worker_pool(branches, move |branch| {
-        gt_branch_parent(&root, &branch).map(|parent| (branch, parent))
-    }) {
-        branch_to_parent.insert(branch, parent);
+fn write_stack_cache(root: &Path, signature: &str, stack_info: &StackInfo) {
+    let Some(path) = stack_cache_path(root) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+
+    if fs::create_dir_all(parent).is_err() {
+        return;
     }
 
-    branch_to_parent
+    let entry = StackCacheEntry {
+        version: STACK_CACHE_VERSION,
+        signature: signature.to_string(),
+        stack_info: CachedStackInfo {
+            stacks: stack_info.stacks.clone(),
+            standalone: stack_info.standalone.clone(),
+            branch_to_parent: stack_info.branch_to_parent.clone(),
+        },
+    };
+
+    let Ok(serialized) = toml::to_string(&entry) else {
+        return;
+    };
+    let _ = fs::write(path, serialized);
+}
+
+fn stack_cache_path(root: &Path) -> Option<PathBuf> {
+    let base = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    let repo_key = format!("{:016x}", hasher.finish());
+    Some(base.join("gl").join("stacks").join(format!("{repo_key}.toml")))
 }
 
 /// Extract branch names from `gt log short` output, stripping ANSI codes and decorative glyphs.
+#[cfg(test)]
 pub(crate) fn parse_branch_names(output: &str) -> Vec<String> {
+    parse_gt_log_short(output)
+        .into_iter()
+        .map(|line| line.name)
+        .collect()
+}
+
+fn parse_gt_log_short(output: &str) -> Vec<ParsedBranchLine> {
     let stripped = strip_ansi(output);
-    let mut branches = Vec::new();
+    stripped.lines().filter_map(parse_gt_log_short_line).collect()
+}
 
-    for line in stripped.lines() {
-        let Some(name) = line.split_whitespace().last() else {
-            continue;
-        };
-
-        if name.is_empty() {
-            continue;
-        }
-
-        if name
+fn parse_gt_log_short_line(line: &str) -> Option<ParsedBranchLine> {
+    let trimmed_end = line.trim_end();
+    let name = trimmed_end.split_whitespace().last()?.trim();
+    if name.is_empty()
+        || name
             .chars()
             .all(|c| !c.is_alphanumeric() && c != '/' && c != '-' && c != '_')
-        {
-            continue;
-        }
-
-        branches.push(name.to_string());
+    {
+        return None;
     }
 
-    branches
+    let marker_index = trimmed_end.find(is_branch_marker)?;
+    let depth = trimmed_end[..marker_index]
+        .chars()
+        .filter(|ch| matches!(ch, '│' | '|'))
+        .count();
+
+    Some(ParsedBranchLine {
+        name: name.to_string(),
+        depth,
+    })
+}
+
+fn is_branch_marker(ch: char) -> bool {
+    matches!(ch, '◉' | '◯' | '●' | '○')
+}
+
+fn infer_branch_parents_from_gt_log(lines: &[ParsedBranchLine]) -> HashMap<String, String> {
+    let mut branch_to_parent = HashMap::new();
+
+    for (index, branch) in lines.iter().enumerate() {
+        if let Some(parent) = lines[index + 1..]
+            .iter()
+            .find(|candidate| candidate.depth <= branch.depth)
+        {
+            branch_to_parent.insert(branch.name.clone(), parent.name.clone());
+        }
+    }
+
+    branch_to_parent
 }
 
 /// Detect trunk branch from a list of branch names.
@@ -293,6 +398,10 @@ fn compute_stale_branches(
     root: PathBuf,
     branch_to_parent: HashMap<String, String>,
 ) -> HashSet<String> {
+    let _timer = perf::ScopeTimer::new(format!(
+        "compute_stale_branches branches={}",
+        branch_to_parent.len()
+    ));
     let mut stale_branches = HashSet::new();
     for branch in run_in_worker_pool(
         branch_to_parent.into_iter().collect(),
@@ -491,6 +600,76 @@ mod tests {
                 "main",
             ]
         );
+    }
+
+    #[test]
+    fn parse_gt_log_short_tracks_depth() {
+        let output = "\
+◉    tip
+◯    middle
+│ ◯  child-tip
+│ ◯  child-base
+◯─┘  main
+";
+        let parsed = parse_gt_log_short(output);
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedBranchLine {
+                    name: "tip".into(),
+                    depth: 0,
+                },
+                ParsedBranchLine {
+                    name: "middle".into(),
+                    depth: 0,
+                },
+                ParsedBranchLine {
+                    name: "child-tip".into(),
+                    depth: 1,
+                },
+                ParsedBranchLine {
+                    name: "child-base".into(),
+                    depth: 1,
+                },
+                ParsedBranchLine {
+                    name: "main".into(),
+                    depth: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn infer_branch_parents_from_gt_log_uses_next_branch_at_same_or_lower_depth() {
+        let lines = vec![
+            ParsedBranchLine {
+                name: "tip".into(),
+                depth: 0,
+            },
+            ParsedBranchLine {
+                name: "middle".into(),
+                depth: 0,
+            },
+            ParsedBranchLine {
+                name: "child-tip".into(),
+                depth: 1,
+            },
+            ParsedBranchLine {
+                name: "child-base".into(),
+                depth: 1,
+            },
+            ParsedBranchLine {
+                name: "main".into(),
+                depth: 0,
+            },
+        ];
+
+        let parents = infer_branch_parents_from_gt_log(&lines);
+        assert_eq!(parents.get("tip").map(String::as_str), Some("middle"));
+        assert_eq!(parents.get("middle").map(String::as_str), Some("main"));
+        assert_eq!(parents.get("child-tip").map(String::as_str), Some("child-base"));
+        assert_eq!(parents.get("child-base").map(String::as_str), Some("main"));
+        assert!(!parents.contains_key("main"));
     }
 
     // --- detect_trunk ---

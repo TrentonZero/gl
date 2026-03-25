@@ -1,5 +1,6 @@
 mod config;
 mod git;
+mod perf;
 mod stack;
 mod syntax;
 mod ui;
@@ -11,7 +12,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use git::{load_branch_diff, open_repo, refresh_repo, BranchDiff, RepoState};
+use git::{load_branch_diff, load_commit_counts, open_repo, refresh_repo, BranchDiff, BranchInfo, RepoState};
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackInfo};
 use std::{
@@ -25,17 +26,35 @@ use syntax::SyntaxHighlighter;
 use ui::{draw, BranchEntry, FocusedPane};
 
 fn main() -> Result<()> {
+    let _main_timer = perf::ScopeTimer::new("main");
     let repo_arg = env::args().nth(1).map(PathBuf::from);
-    let config = AppConfig::load();
-    let repo = open_repo(repo_arg)?;
-    let stack_info = detect_stacks(&repo.root);
-    let mut app = App::new(config, repo, stack_info);
+    let config = {
+        let _timer = perf::ScopeTimer::new("AppConfig::load");
+        AppConfig::load()
+    };
+    let repo = {
+        let _timer = perf::ScopeTimer::new("open_repo");
+        open_repo(repo_arg)?
+    };
+    let stack_info = {
+        let _timer = perf::ScopeTimer::new("detect_stacks");
+        detect_stacks(&repo.root, &repo, true)
+    };
+    let mut app = {
+        let _timer = perf::ScopeTimer::new("App::new");
+        App::new(config, repo, stack_info)
+    };
     app.run()
 }
 
 struct StackLoadResult {
     request_id: usize,
     stack_info: StackInfo,
+}
+
+struct CommitCountLoadResult {
+    request_id: usize,
+    commit_counts: Vec<(String, usize)>,
 }
 
 struct App {
@@ -53,16 +72,20 @@ struct App {
     search_input: String,
     search_matches: Vec<usize>,
     search_cursor: usize,
-    syntax_highlighter: SyntaxHighlighter,
+    syntax_highlighter: Option<SyntaxHighlighter>,
     stack_result_tx: Sender<StackLoadResult>,
     stack_result_rx: Receiver<StackLoadResult>,
     stack_request_id: usize,
+    commit_count_result_tx: Sender<CommitCountLoadResult>,
+    commit_count_result_rx: Receiver<CommitCountLoadResult>,
+    commit_count_request_id: usize,
 }
 
 impl App {
     fn new(config: AppConfig, repo: RepoState, stack_info: StackInfo) -> Self {
         let display_entries = build_display_entries(&repo, &stack_info);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
+        let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
         let mut app = Self {
             config,
             repo,
@@ -78,16 +101,21 @@ impl App {
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
-            syntax_highlighter: SyntaxHighlighter::new(),
+            syntax_highlighter: None,
             stack_result_tx,
             stack_result_rx,
             stack_request_id: 0,
+            commit_count_result_tx,
+            commit_count_result_rx,
+            commit_count_request_id: 0,
         };
         app.reload_stack_info_async();
+        app.reload_commit_counts_async();
         app
     }
 
     fn run(&mut self) -> Result<()> {
+        let _timer = perf::ScopeTimer::new("App::run");
         let mut stdout = io::stdout();
         enable_raw_mode().context("failed to enable raw mode")?;
         execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
@@ -103,12 +131,21 @@ impl App {
 
     fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         let mut needs_redraw = true;
+        let mut first_draw_logged = false;
         loop {
             if self.apply_pending_stack_updates() {
                 needs_redraw = true;
             }
+            if self.apply_pending_commit_count_updates() {
+                needs_redraw = true;
+            }
 
             if needs_redraw {
+                let _draw_timer = if !first_draw_logged {
+                    Some(perf::ScopeTimer::new("first terminal draw"))
+                } else {
+                    None
+                };
                 terminal.draw(|frame| {
                     draw(
                         frame,
@@ -128,6 +165,10 @@ impl App {
                         },
                     );
                 })?;
+                if !first_draw_logged {
+                    perf::log("first frame rendered");
+                    first_draw_logged = true;
+                }
                 needs_redraw = false;
             }
 
@@ -349,23 +390,18 @@ impl App {
     }
 
     fn open_selected_branch(&mut self) -> Result<()> {
+        let _timer = perf::ScopeTimer::new("open_selected_branch");
         let entry = match self.display_entries.get(self.selected_index) {
             Some(e) if !e.is_header() => e.clone(),
             _ => return Ok(()),
         };
 
-        let Some(branch) = self
-            .repo
-            .branches
-            .iter()
-            .find(|b| b.name == entry.branch_name())
-            .cloned()
-        else {
+        let Some(branch) = branch_for_diff(&self.repo, &self.stack_info, entry.branch_name()) else {
             return Ok(());
         };
 
         let diff = load_branch_diff(&self.repo.root, &branch)?;
-        self.highlighted_diff = Some(self.syntax_highlighter.highlight_diff(&diff)?);
+        self.highlighted_diff = Some(self.syntax_highlighter().highlight_diff(&diff)?);
         self.branch_diff = Some(diff);
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
@@ -385,10 +421,12 @@ impl App {
     }
 
     fn refresh_repo(&mut self) -> Result<()> {
+        let _timer = perf::ScopeTimer::new("App::refresh_repo");
         self.repo = refresh_repo(&self.repo.root)?;
-        self.stack_info = detect_stacks(&self.repo.root);
+        self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
         self.rebuild_display_entries_preserve_selection(None);
         self.reload_stack_info_async();
+        self.reload_commit_counts_async();
 
         // Clamp selected_index to a valid selectable entry
         let selectable: Vec<usize> = self
@@ -405,15 +443,11 @@ impl App {
         }
 
         if let Some(current_diff) = &self.branch_diff {
-            if let Some(branch) = self
-                .repo
-                .branches
-                .iter()
-                .find(|branch| branch.name == current_diff.branch_name)
-                .cloned()
+            if let Some(branch) =
+                branch_for_diff(&self.repo, &self.stack_info, &current_diff.branch_name)
             {
                 let diff = load_branch_diff(&self.repo.root, &branch)?;
-                self.highlighted_diff = Some(self.syntax_highlighter.highlight_diff(&diff)?);
+                self.highlighted_diff = Some(self.syntax_highlighter().highlight_diff(&diff)?);
                 self.branch_diff = Some(diff);
                 self.refresh_search_matches();
             } else {
@@ -431,10 +465,28 @@ impl App {
         let stack_info = self.stack_info.clone();
         let tx = self.stack_result_tx.clone();
         thread::spawn(move || {
+            let _timer = perf::ScopeTimer::new(format!("reload_stack_info_async request={request_id}"));
             let stack_info = enrich_stacks(&root, &stack_info);
             let _ = tx.send(StackLoadResult {
                 request_id,
                 stack_info,
+            });
+        });
+    }
+
+    fn reload_commit_counts_async(&mut self) {
+        self.commit_count_request_id += 1;
+        let request_id = self.commit_count_request_id;
+        let root = self.repo.root.clone();
+        let repo = self.repo.clone();
+        let tx = self.commit_count_result_tx.clone();
+        thread::spawn(move || {
+            let _timer =
+                perf::ScopeTimer::new(format!("reload_commit_counts_async request={request_id}"));
+            let commit_counts = load_commit_counts(&root, &repo);
+            let _ = tx.send(CommitCountLoadResult {
+                request_id,
+                commit_counts,
             });
         });
     }
@@ -452,6 +504,33 @@ impl App {
             changed = true;
         }
         changed
+    }
+
+    fn apply_pending_commit_count_updates(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.commit_count_result_rx.try_recv() {
+            if result.request_id != self.commit_count_request_id {
+                continue;
+            }
+
+            let selected_branch = self.selected_branch_name().map(ToOwned::to_owned);
+            for (name, commit_count) in result.commit_counts {
+                if let Some(branch) = self.repo.branches.iter_mut().find(|branch| branch.name == name) {
+                    branch.commit_count = commit_count;
+                    changed = true;
+                }
+            }
+
+            if changed {
+                self.rebuild_display_entries_preserve_selection(selected_branch.as_deref());
+            }
+        }
+        changed
+    }
+
+    fn syntax_highlighter(&mut self) -> &mut SyntaxHighlighter {
+        self.syntax_highlighter
+            .get_or_insert_with(SyntaxHighlighter::new)
     }
 
     fn rebuild_display_entries_preserve_selection(&mut self, branch_name: Option<&str>) {
@@ -659,6 +738,18 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
     entries
 }
 
+fn branch_for_diff(repo: &RepoState, stack_info: &StackInfo, branch_name: &str) -> Option<BranchInfo> {
+    let mut branch = repo
+        .branches
+        .iter()
+        .find(|branch| branch.name == branch_name)
+        .cloned()?;
+    if let Some(parent) = stack_info.branch_to_parent.get(branch_name) {
+        branch.base_ref = Some(parent.clone());
+    }
+    Some(branch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +762,7 @@ mod tests {
         BranchInfo {
             name: name.to_string(),
             is_head: false,
+            object_id: format!("{name}-oid"),
             upstream: None,
             ahead: 0,
             behind: 0,
@@ -781,6 +873,25 @@ mod tests {
         let entries = build_display_entries(&repo, &stacks);
         let names: Vec<_> = entries.iter().map(BranchEntry::branch_name).collect();
         assert_eq!(names, vec!["topic", "main", "fix"]);
+    }
+
+    #[test]
+    fn branch_for_diff_prefers_stack_parent_over_default_base() {
+        let repo = make_repo(&["stack-base", "stack-top", "main"]);
+        let mut branch_to_parent = HashMap::new();
+        branch_to_parent.insert("stack-top".into(), "stack-base".into());
+        let stacks = StackInfo {
+            stacks: vec![Stack {
+                name: "stack".into(),
+                branches: vec!["stack-base".into(), "stack-top".into()],
+            }],
+            standalone: vec!["main".into()],
+            branch_to_parent,
+            stale_branches: std::collections::HashSet::new(),
+        };
+
+        let branch = branch_for_diff(&repo, &stacks, "stack-top").unwrap();
+        assert_eq!(branch.base_ref.as_deref(), Some("stack-base"));
     }
 
     // --- selection navigation helpers ---
