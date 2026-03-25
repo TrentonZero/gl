@@ -5,9 +5,9 @@ use std::process::Command;
 #[derive(Debug, Clone)]
 pub struct StackInfo {
     pub stacks: Vec<Stack>,
-    #[allow(dead_code)]
     pub standalone: Vec<String>,
     pub branch_to_parent: HashMap<String, String>,
+    pub status: StackStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -16,12 +16,24 @@ pub struct Stack {
     pub branches: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StackStatus {
+    Available,
+    Degraded { message: String },
+}
+
 impl StackInfo {
-    #[allow(dead_code)]
     pub fn stack_for_branch(&self, branch: &str) -> Option<&Stack> {
         self.stacks
             .iter()
             .find(|s| s.branches.iter().any(|b| b == branch))
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        match &self.status {
+            StackStatus::Available => None,
+            StackStatus::Degraded { message } => Some(message.as_str()),
+        }
     }
 
     pub fn is_stale(&self, root: &Path, branch: &str) -> bool {
@@ -44,6 +56,9 @@ pub fn detect_stacks(root: &Path) -> StackInfo {
             stacks: vec![],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            status: StackStatus::Degraded {
+                message: "Graphite CLI not found; showing a flat branch list.".to_string(),
+            },
         };
     }
 
@@ -54,6 +69,10 @@ pub fn detect_stacks(root: &Path) -> StackInfo {
                 stacks: vec![],
                 standalone: vec![],
                 branch_to_parent: HashMap::new(),
+                status: StackStatus::Degraded {
+                    message: "Graphite stack metadata unavailable; showing a flat branch list."
+                        .to_string(),
+                },
             }
         }
     };
@@ -194,67 +213,85 @@ pub(crate) fn build_stacks_from_parents(
     branch_to_parent: &HashMap<String, String>,
 ) -> StackInfo {
     let trunk = detect_trunk(branches);
-    let mut visited: HashMap<String, bool> = HashMap::new();
-    let mut stacks: Vec<Stack> = Vec::new();
-    let mut standalone: Vec<String> = Vec::new();
+    let branch_order: HashMap<&str, usize> = branches
+        .iter()
+        .enumerate()
+        .map(|(idx, branch)| (branch.as_str(), idx))
+        .collect();
+    let mut children_of: HashMap<String, Vec<String>> = HashMap::new();
+    for (child, parent) in branch_to_parent {
+        children_of
+            .entry(parent.clone())
+            .or_default()
+            .push(child.clone());
+    }
+    for children in children_of.values_mut() {
+        children.sort_by_key(|child| {
+            branch_order
+                .get(child.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    let mut stacks = Vec::new();
+    let mut standalone = Vec::new();
+    let mut assigned = std::collections::HashSet::new();
 
     for branch in branches {
         if Some(branch.as_str()) == trunk.as_deref() {
             standalone.push(branch.clone());
-            continue;
-        }
-        if visited.contains_key(branch) {
+            assigned.insert(branch.clone());
             continue;
         }
 
-        // Walk up the parent chain to find the full stack
+        let Some(parent) = branch_to_parent.get(branch) else {
+            standalone.push(branch.clone());
+            assigned.insert(branch.clone());
+            continue;
+        };
+
+        let is_stack_root =
+            Some(parent.as_str()) == trunk.as_deref() || !branch_to_parent.contains_key(parent);
+        if !is_stack_root || assigned.contains(branch) {
+            continue;
+        }
+
         let mut chain = vec![branch.clone()];
-        let mut current = branch.clone();
-        while let Some(parent) = branch_to_parent.get(&current) {
-            if Some(parent.as_str()) == trunk.as_deref() {
+        assigned.insert(branch.clone());
+        let mut cursor = branch.clone();
+
+        loop {
+            let Some(children) = children_of.get(&cursor) else {
+                break;
+            };
+            if children.len() != 1 {
                 break;
             }
-            if visited.contains_key(parent) {
+
+            let child = &children[0];
+            if assigned.contains(child) {
                 break;
             }
-            chain.push(parent.clone());
-            current = parent.clone();
+
+            chain.push(child.clone());
+            assigned.insert(child.clone());
+            cursor = child.clone();
         }
 
-        // Also walk down to find children
-        let mut children_of: HashMap<String, Vec<String>> = HashMap::new();
-        for (child, parent) in branch_to_parent {
-            children_of
-                .entry(parent.clone())
-                .or_default()
-                .push(child.clone());
-        }
-
-        // Rebuild the full stack from root
-        let stack_root = chain.last().unwrap().clone();
-        let mut ordered_stack = Vec::new();
-        let mut queue = vec![stack_root];
-        while let Some(node) = queue.pop() {
-            if visited.contains_key(&node) {
-                continue;
-            }
-            visited.insert(node.clone(), true);
-            ordered_stack.push(node.clone());
-            if let Some(children) = children_of.get(&node) {
-                for child in children {
-                    queue.push(child.clone());
-                }
-            }
-        }
-
-        if ordered_stack.len() > 1 {
-            let name = format!("{} stack", ordered_stack.first().unwrap());
+        if chain.len() > 1 {
             stacks.push(Stack {
-                name,
-                branches: ordered_stack,
+                name: format!("{} stack", chain[0]),
+                branches: chain,
             });
-        } else if ordered_stack.len() == 1 {
-            standalone.push(ordered_stack.into_iter().next().unwrap());
+        } else {
+            standalone.push(branch.clone());
+        }
+    }
+
+    for branch in branches {
+        if assigned.insert(branch.clone()) {
+            standalone.push(branch.clone());
         }
     }
 
@@ -262,6 +299,7 @@ pub(crate) fn build_stacks_from_parents(
         stacks,
         standalone,
         branch_to_parent: branch_to_parent.clone(),
+        status: StackStatus::Available,
     }
 }
 
@@ -412,6 +450,7 @@ mod tests {
         // Base should come first
         assert_eq!(info.stacks[0].branches[0], "feat/auth-base");
         assert!(info.standalone.contains(&"main".to_string()));
+        assert_eq!(info.status, StackStatus::Available);
     }
 
     #[test]
@@ -449,6 +488,26 @@ mod tests {
     }
 
     #[test]
+    fn build_stacks_branching_children_fall_back_to_standalone() {
+        let branches = vec![
+            "feat/base".into(),
+            "feat/one".into(),
+            "feat/two".into(),
+            "main".into(),
+        ];
+        let mut parents = HashMap::new();
+        parents.insert("feat/base".into(), "main".into());
+        parents.insert("feat/one".into(), "feat/base".into());
+        parents.insert("feat/two".into(), "feat/base".into());
+
+        let info = build_stacks_from_parents(&branches, &parents);
+        assert!(info.stacks.is_empty());
+        assert!(info.standalone.contains(&"feat/base".to_string()));
+        assert!(info.standalone.contains(&"feat/one".to_string()));
+        assert!(info.standalone.contains(&"feat/two".to_string()));
+    }
+
+    #[test]
     fn build_stacks_no_parents() {
         let branches = vec!["feature".into(), "main".into()];
         let parents = HashMap::new();
@@ -476,6 +535,7 @@ mod tests {
             }],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            status: StackStatus::Available,
         };
         let stack = info.stack_for_branch("auth-ui");
         assert!(stack.is_some());
@@ -488,8 +548,22 @@ mod tests {
             stacks: vec![],
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::new(),
+            status: StackStatus::Available,
         };
         assert!(info.stack_for_branch("main").is_none());
+    }
+
+    #[test]
+    fn degraded_notice_is_exposed() {
+        let info = StackInfo {
+            stacks: vec![],
+            standalone: vec![],
+            branch_to_parent: HashMap::new(),
+            status: StackStatus::Degraded {
+                message: "degraded".into(),
+            },
+        };
+        assert_eq!(info.notice(), Some("degraded"));
     }
 }
 

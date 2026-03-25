@@ -100,6 +100,7 @@ impl App {
                     } else {
                         None
                     },
+                    self.stack_info.notice(),
                 );
             })?;
 
@@ -302,21 +303,13 @@ impl App {
     }
 
     fn jump_to_first_branch(&mut self) {
-        if let Some(pos) = self
-            .display_entries
-            .iter()
-            .position(|e| !e.is_header())
-        {
+        if let Some(pos) = self.display_entries.iter().position(|e| !e.is_header()) {
             self.selected_index = pos;
         }
     }
 
     fn jump_to_last_branch(&mut self) {
-        if let Some(pos) = self
-            .display_entries
-            .iter()
-            .rposition(|e| !e.is_header())
-        {
+        if let Some(pos) = self.display_entries.iter().rposition(|e| !e.is_header()) {
             self.selected_index = pos;
         }
     }
@@ -550,7 +543,7 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
 mod tests {
     use super::*;
     use crate::git::BranchInfo;
-    use crate::stack::{Stack, StackInfo};
+    use crate::stack::{Stack, StackInfo, StackStatus};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -578,6 +571,7 @@ mod tests {
             stacks: vec![],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            status: StackStatus::Available,
         }
     }
 
@@ -604,6 +598,7 @@ mod tests {
             }],
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::new(),
+            status: StackStatus::Available,
         };
 
         let entries = build_display_entries(&repo, &stacks);
@@ -626,6 +621,7 @@ mod tests {
             }],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            status: StackStatus::Available,
         };
 
         let entries = build_display_entries(&repo, &stacks);

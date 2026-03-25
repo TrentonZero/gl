@@ -58,6 +58,7 @@ pub fn draw(
     show_help: bool,
     focus: FocusedPane,
     search: Option<&str>,
+    stack_notice: Option<&str>,
 ) {
     let frame_area = frame.size();
     let areas = if config.chrome {
@@ -93,6 +94,7 @@ pub fn draw(
         highlighted_diff,
         diff_scroll,
         focus,
+        stack_notice,
     );
 
     if show_help {
@@ -168,6 +170,7 @@ fn draw_body(
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
     focus: FocusedPane,
+    stack_notice: Option<&str>,
 ) {
     match branch_diff {
         Some(diff) => {
@@ -181,6 +184,7 @@ fn draw_body(
                 display_entries,
                 selected_index,
                 focus == FocusedPane::BranchList,
+                stack_notice,
             );
             draw_diff(
                 frame,
@@ -191,7 +195,14 @@ fn draw_body(
                 focus == FocusedPane::Diff,
             );
         }
-        None => draw_branch_list(frame, area, display_entries, selected_index, true),
+        None => draw_branch_list(
+            frame,
+            area,
+            display_entries,
+            selected_index,
+            true,
+            stack_notice,
+        ),
     }
 }
 
@@ -201,6 +212,7 @@ fn draw_branch_list(
     display_entries: &[BranchEntry],
     selected_index: usize,
     focused: bool,
+    stack_notice: Option<&str>,
 ) {
     let items: Vec<ListItem<'_>> = display_entries
         .iter()
@@ -212,7 +224,10 @@ fn draw_branch_list(
     state.select(Some(selected_index));
 
     let block = Block::default()
-        .title("Branches")
+        .title(match stack_notice {
+            Some(_) => "Branches [degraded]",
+            None => "Branches",
+        })
         .borders(Borders::ALL)
         .border_style(if focused {
             Style::default().fg(Color::Blue)
@@ -230,18 +245,32 @@ fn draw_branch_list(
         .highlight_symbol(" ");
 
     frame.render_stateful_widget(list, area, &mut state);
+
+    if let Some(message) = stack_notice {
+        let notice_area = Rect::new(
+            area.x.saturating_add(2),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(4),
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                message,
+                Style::default().fg(Color::Yellow),
+            ))),
+            notice_area,
+        );
+    }
 }
 
 fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
     match entry {
-        BranchEntry::Header { label } => Line::from(vec![
-            Span::styled(
-                format!(" {label}"),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        BranchEntry::Header { label } => Line::from(vec![Span::styled(
+            format!(" {label}"),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )]),
         BranchEntry::Branch {
             branch_name,
             is_head,
@@ -284,7 +313,10 @@ fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
             } else {
                 format!("{:<width$}", branch_name, width = max_name_len)
             };
-            spans.push(Span::styled(display_name, Style::default().fg(Color::White)));
+            spans.push(Span::styled(
+                display_name,
+                Style::default().fg(Color::White),
+            ));
 
             // Commit count
             if *commit_count > 0 {
