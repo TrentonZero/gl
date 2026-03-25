@@ -194,10 +194,9 @@ Throughout the UI, any branch that is currently checked out in a worktree should
 GL discovers stack structure by invoking the Graphite CLI (`gt`) rather than reading Graphite's internal metadata files directly. Relevant commands include:
 
 - `gt log short` — list branches in stack order
-- `gt branch info` — get a branch's parent and children
 - `gt stack` — display the current stack
 
-GL should parse the CLI output and cache the result, refreshing when the user triggers a sync or when GL detects branch ref changes via filesystem watching. This keeps GL decoupled from Graphite's internal storage format and ensures compatibility across Graphite CLI versions.
+GL should prefer deriving stack structure from a single `gt log short` snapshot and cache the result, refreshing when the user triggers a sync or when GL detects branch ref changes via filesystem watching. The first frame must stay fast: startup work on the critical path should avoid per-branch CLI fan-out and other N-subprocess patterns before the initial paint. This keeps GL decoupled from Graphite's internal storage format and ensures compatibility across Graphite CLI versions.
 
 If the Graphite CLI is not installed or not initialized in the repository, GL should fall back to manual stack definition or infer stacks from merge-base relationships, and display a notice that stack features are degraded.
 

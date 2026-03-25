@@ -1,4 +1,5 @@
 use crate::git::{BranchDiff, DiffLine, DiffLineKind};
+use crate::perf;
 use anyhow::Result;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -25,6 +26,7 @@ pub struct SyntaxHighlighter {
 
 impl SyntaxHighlighter {
     pub fn new() -> Self {
+        let _timer = perf::ScopeTimer::new("SyntaxHighlighter::new");
         let syntax_set = SyntaxSet::load_defaults_newlines();
         let themes = ThemeSet::load_defaults();
         let theme = themes
@@ -42,6 +44,11 @@ impl SyntaxHighlighter {
     }
 
     pub fn highlight_diff(&mut self, diff: &BranchDiff) -> Result<Vec<Line<'static>>> {
+        let _timer = perf::ScopeTimer::new(format!(
+            "highlight_diff branch={} lines={}",
+            diff.branch_name,
+            diff.lines.len()
+        ));
         let mut rendered = Vec::with_capacity(diff.lines.len());
         let mut index = 0usize;
 

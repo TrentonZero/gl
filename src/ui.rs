@@ -202,9 +202,10 @@ fn draw_branch_list(
     selected_index: usize,
     focused: bool,
 ) {
+    let content_width = area.width.saturating_sub(3) as usize;
     let items: Vec<ListItem<'_>> = display_entries
         .iter()
-        .map(branch_entry_item)
+        .map(|entry| branch_entry_item(entry, content_width))
         .map(ListItem::new)
         .collect();
 
@@ -232,7 +233,7 @@ fn draw_branch_list(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
+fn branch_entry_item(entry: &BranchEntry, available_width: usize) -> Line<'static> {
     match entry {
         BranchEntry::Header { label } => Line::from(vec![Span::styled(
             format!(" {label}"),
@@ -275,13 +276,12 @@ fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
                 spans.push(Span::raw("  "));
             }
 
-            // Branch name - truncate to fit
-            let max_name_len = if *indent > 0 { 20 - indent * 2 } else { 20 };
-            let display_name = if branch_name.len() > max_name_len {
-                format!("{:.width$}", branch_name, width = max_name_len)
-            } else {
-                format!("{:<width$}", branch_name, width = max_name_len)
-            };
+            let prefix_width = indent * 2 + 2;
+            let suffix_width = branch_suffix_width(*commit_count, *ahead, *behind, *has_upstream);
+            let name_width = available_width
+                .saturating_sub(prefix_width + suffix_width)
+                .max(1);
+            let display_name = format_branch_name(branch_name, name_width);
             spans.push(Span::styled(
                 display_name,
                 Style::default().fg(Color::White),
@@ -316,6 +316,47 @@ fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
             Line::from(spans)
         }
     }
+}
+
+fn branch_suffix_width(
+    commit_count: usize,
+    ahead: usize,
+    behind: usize,
+    has_upstream: bool,
+) -> usize {
+    let mut width = 0;
+
+    if commit_count > 0 {
+        width += 2 + commit_count.to_string().len() + 1;
+    }
+
+    if ahead == 0 && behind == 0 && has_upstream {
+        width += 2;
+    } else {
+        if ahead > 0 {
+            width += 2 + ahead.to_string().len();
+        }
+        if behind > 0 {
+            width += 2 + behind.to_string().len();
+        }
+    }
+
+    width
+}
+
+fn format_branch_name(branch_name: &str, width: usize) -> String {
+    let name_len = branch_name.chars().count();
+    if name_len <= width {
+        return format!("{branch_name:<width$}");
+    }
+
+    if width <= 1 {
+        return branch_name.chars().take(width).collect();
+    }
+
+    let mut truncated: String = branch_name.chars().take(width - 1).collect();
+    truncated.push('~');
+    truncated
 }
 
 fn draw_diff(
@@ -547,7 +588,7 @@ mod tests {
         let entry = BranchEntry::Header {
             label: "auth stack".into(),
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("auth stack"));
     }
@@ -564,7 +605,7 @@ mod tests {
             indent: 0,
             stale: false,
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"));
     }
@@ -581,7 +622,7 @@ mod tests {
             indent: 0,
             stale: false,
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("5c"));
     }
@@ -598,7 +639,7 @@ mod tests {
             indent: 0,
             stale: false,
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("✓"));
     }
@@ -615,7 +656,7 @@ mod tests {
             indent: 0,
             stale: false,
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("↑3"));
         assert!(text.contains("↓2"));
@@ -633,7 +674,7 @@ mod tests {
             indent: 1,
             stale: true,
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("⚠"));
     }
@@ -650,9 +691,43 @@ mod tests {
             indent: 2,
             stale: false,
         };
-        let line = branch_entry_item(&entry);
+        let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("│"));
         assert!(text.contains("├"));
+    }
+
+    #[test]
+    fn branch_item_uses_available_width_for_deeply_indented_name() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feature/payments-api-long".into(),
+            is_head: false,
+            commit_count: 1,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 3,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry, 40);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("feature/payments-api-long"));
+    }
+
+    #[test]
+    fn branch_item_truncates_only_when_pane_is_too_narrow() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feature/payments-api-long".into(),
+            is_head: false,
+            commit_count: 12,
+            ahead: 3,
+            behind: 0,
+            has_upstream: true,
+            indent: 3,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry, 24);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("~"));
     }
 }

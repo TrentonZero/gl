@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use crate::perf;
 use std::{
     collections::HashMap,
     env,
@@ -16,6 +17,7 @@ pub struct RepoState {
 pub struct BranchInfo {
     pub name: String,
     pub is_head: bool,
+    pub object_id: String,
     pub upstream: Option<String>,
     pub ahead: usize,
     pub behind: usize,
@@ -52,6 +54,7 @@ pub enum DiffLineKind {
 struct RawBranch {
     name: String,
     is_head: bool,
+    object_id: String,
     upstream: Option<String>,
     ahead: usize,
     behind: usize,
@@ -64,24 +67,22 @@ pub fn open_repo(path: Option<PathBuf>) -> Result<RepoState> {
 }
 
 pub fn refresh_repo(root: &Path) -> Result<RepoState> {
+    let _timer = perf::ScopeTimer::new("refresh_repo");
     let raw_branches = local_branches(root)?;
     let default_base = infer_default_base(root, &raw_branches)?;
 
     let mut branches = Vec::with_capacity(raw_branches.len());
     for raw in raw_branches {
         let base_ref = raw.upstream.clone().or_else(|| default_base.clone());
-        let commit_count = match &base_ref {
-            Some(base) => commit_count_above(root, &raw.name, base).unwrap_or(0),
-            None => 0,
-        };
 
         branches.push(BranchInfo {
             name: raw.name,
             is_head: raw.is_head,
+            object_id: raw.object_id,
             upstream: raw.upstream,
             ahead: raw.ahead,
             behind: raw.behind,
-            commit_count,
+            commit_count: 0,
             base_ref,
         });
     }
@@ -93,7 +94,28 @@ pub fn refresh_repo(root: &Path) -> Result<RepoState> {
     })
 }
 
+pub fn load_commit_counts(root: &Path, repo: &RepoState) -> Vec<(String, usize)> {
+    let _timer = perf::ScopeTimer::new(format!(
+        "load_commit_counts branches={}",
+        repo.branches.len()
+    ));
+    repo.branches
+        .iter()
+        .map(|branch| {
+            let commit_count = match &branch.base_ref {
+                Some(base_ref) if branch.upstream.as_deref() == Some(base_ref.as_str()) => {
+                    branch.ahead
+                }
+                Some(base_ref) => commit_count_above(root, &branch.name, base_ref).unwrap_or(0),
+                None => 0,
+            };
+            (branch.name.clone(), commit_count)
+        })
+        .collect()
+}
+
 pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> {
+    let _timer = perf::ScopeTimer::new(format!("load_branch_diff branch={}", branch.name));
     let base_ref = branch.base_ref.clone();
     let Some(base_ref_name) = base_ref.clone() else {
         return Ok(BranchDiff {
@@ -141,6 +163,7 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
 }
 
 fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
+    let _timer = perf::ScopeTimer::new("local_branches");
     let output = git(
         root,
         [
@@ -164,11 +187,12 @@ fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
         let (ahead, behind) = parts.next().map(parse_upstream_track).unwrap_or((0, 0));
-        let _ = parts.next();
+        let object_id = parts.next().unwrap_or_default().trim().to_string();
 
         branches.push(RawBranch {
             name,
             is_head: head_marker == "*",
+            object_id,
             upstream,
             ahead,
             behind,
@@ -179,6 +203,7 @@ fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
 }
 
 fn infer_default_base(root: &Path, branches: &[RawBranch]) -> Result<Option<String>> {
+    let _timer = perf::ScopeTimer::new(format!("infer_default_base branches={}", branches.len()));
     if let Ok(remote_head) = git(
         root,
         ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -221,6 +246,8 @@ fn parse_upstream_track(track: &str) -> (usize, usize) {
 }
 
 fn commit_count_above(root: &Path, branch: &str, base_ref: &str) -> Result<usize> {
+    let _timer =
+        perf::ScopeTimer::new(format!("commit_count_above branch={branch} base={base_ref}"));
     let count = git(root, ["rev-list", "--count", branch, "--not", base_ref])?;
     Ok(count.trim().parse::<usize>().unwrap_or(0))
 }
@@ -323,6 +350,8 @@ pub(crate) fn parse_diff(
 }
 
 fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
+    let label = format!("git {}", args.join(" "));
+    let _timer = perf::ScopeTimer::new(label);
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
