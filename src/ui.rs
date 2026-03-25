@@ -339,23 +339,61 @@ fn draw_diff(
             Style::default().fg(Color::DarkGray)
         });
 
-    let lines: Vec<Line<'_>> = match highlighted_diff {
-        Some(lines) => lines.to_vec(),
-        None => diff
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(idx, line)| render_diff_line(idx, line))
-            .collect(),
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let lines = match highlighted_diff {
+        Some(lines) => visible_highlighted_lines(lines, diff_scroll, visible_height),
+        None => visible_plain_diff_lines(diff, diff_scroll, visible_height),
     };
 
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .scroll((diff_scroll as u16, 0))
+            .scroll((0, 0))
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn visible_highlighted_lines(
+    lines: &[Line<'static>],
+    diff_scroll: usize,
+    visible_height: usize,
+) -> Vec<Line<'static>> {
+    visible_slice_bounds(lines.len(), diff_scroll, visible_height)
+        .map(|(start, end)| lines[start..end].to_vec())
+        .unwrap_or_default()
+}
+
+fn visible_plain_diff_lines(
+    diff: &BranchDiff,
+    diff_scroll: usize,
+    visible_height: usize,
+) -> Vec<Line<'static>> {
+    let Some((start, end)) = visible_slice_bounds(diff.lines.len(), diff_scroll, visible_height) else {
+        return Vec::new();
+    };
+
+    diff.lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(idx, line)| render_diff_line(idx, line))
+        .collect()
+}
+
+fn visible_slice_bounds(
+    total_lines: usize,
+    diff_scroll: usize,
+    visible_height: usize,
+) -> Option<(usize, usize)> {
+    if total_lines == 0 || visible_height == 0 {
+        return None;
+    }
+
+    let start = diff_scroll.min(total_lines.saturating_sub(1));
+    let end = (start + visible_height).min(total_lines);
+    Some((start, end))
 }
 
 fn render_diff_line(index: usize, line: &crate::git::DiffLine) -> Line<'static> {
