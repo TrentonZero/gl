@@ -47,7 +47,17 @@ pub fn detect_stacks(root: &Path) -> StackInfo {
         None => return StackInfo::empty(),
     };
 
-    parse_gt_log(&output)
+    let branches = parse_branch_names(&output);
+    if branches.is_empty() {
+        return StackInfo::empty();
+    }
+
+    let branch_to_parent = load_branch_parents(root.to_path_buf(), branches.clone());
+    if branch_to_parent.is_empty() {
+        return build_stacks_from_order(&branches);
+    }
+
+    build_stacks_from_parents(&branches, &branch_to_parent)
 }
 
 pub fn enrich_stacks(root: &Path, stack_info: &StackInfo) -> StackInfo {
@@ -108,23 +118,6 @@ fn gt_branch_parent(root: &Path, branch: &str) -> Option<String> {
     None
 }
 
-/// Parse `gt log short` output to extract stack structure.
-///
-/// The output format looks like:
-/// ```
-/// ◉  feature/auth-ui
-/// ◉  feature/auth-middleware
-/// ◉  feature/auth-base
-/// ◉  main
-/// ```
-///
-/// Branches above trunk (main/master) that appear in a contiguous sequence
-/// form a stack. The trunk branch itself is standalone.
-fn parse_gt_log(output: &str) -> StackInfo {
-    let branches = parse_branch_names(output);
-    build_stacks_from_order(&branches)
-}
-
 fn load_branch_parents(root: PathBuf, branches: Vec<String>) -> HashMap<String, String> {
     let mut branch_to_parent = HashMap::new();
     for (branch, parent) in run_in_worker_pool(branches, move |branch| {
@@ -142,19 +135,9 @@ pub(crate) fn parse_branch_names(output: &str) -> Vec<String> {
     let mut branches = Vec::new();
 
     for line in stripped.lines() {
-        let trimmed = line.trim();
-        let name = trimmed
-            .trim_start_matches('◉')
-            .trim_start_matches('●')
-            .trim_start_matches('◯')
-            .trim_start_matches('○')
-            .trim_start_matches('│')
-            .trim_start_matches('├')
-            .trim_start_matches('└')
-            .trim_start_matches('─')
-            .trim_start_matches('|')
-            .trim_start_matches('-')
-            .trim();
+        let Some(name) = line.split_whitespace().last() else {
+            continue;
+        };
 
         if name.is_empty() {
             continue;
@@ -478,6 +461,38 @@ mod tests {
         assert_eq!(names, vec!["my_feature_branch"]);
     }
 
+    #[test]
+    fn parse_branch_names_with_graph_prefixes() {
+        let output = "\
+◉    fix-stacked-branch-name-truncation
+◯    perf-gt-tuning
+◯    perf-borrow-diff-lines
+◯    perf-event-driven-redraw
+◯    perf-stale-metadata
+◯    perf-batched-refresh
+│ ◯  plan-docs-update
+│ ◯  stack-view
+│ ◯  stack-model-cleanup
+◯─┘  main
+";
+        let names = parse_branch_names(output);
+        assert_eq!(
+            names,
+            vec![
+                "fix-stacked-branch-name-truncation",
+                "perf-gt-tuning",
+                "perf-borrow-diff-lines",
+                "perf-event-driven-redraw",
+                "perf-stale-metadata",
+                "perf-batched-refresh",
+                "plan-docs-update",
+                "stack-view",
+                "stack-model-cleanup",
+                "main",
+            ]
+        );
+    }
+
     // --- detect_trunk ---
 
     #[test]
@@ -586,7 +601,12 @@ mod tests {
 
     #[test]
     fn build_stacks_from_order_groups_contiguous_non_trunk_runs() {
-        let branches = vec!["feat/top".into(), "feat/base".into(), "main".into(), "fix".into()];
+        let branches = vec![
+            "feat/top".into(),
+            "feat/base".into(),
+            "main".into(),
+            "fix".into(),
+        ];
 
         let info = build_stacks_from_order(&branches);
         assert_eq!(info.stacks.len(), 1);
