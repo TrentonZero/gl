@@ -447,10 +447,7 @@ index abc1234..def5678 100644
 +    println!(\"world\");
  }";
         let mut stats = HashMap::new();
-        stats.insert(
-            "src/lib.rs".to_string(),
-            ("1".to_string(), "1".to_string()),
-        );
+        stats.insert("src/lib.rs".to_string(), ("1".to_string(), "1".to_string()));
 
         let diff = parse_diff("fix".into(), None, patch, &stats);
         assert_eq!(diff.file_positions, vec![0]);
@@ -562,9 +559,7 @@ index 1111..2222 100644
             .iter()
             .filter(|l| l.kind == DiffLineKind::Meta)
             .collect();
-        assert!(meta_lines
-            .iter()
-            .any(|l| l.text.contains("No newline")));
+        assert!(meta_lines.iter().any(|l| l.text.contains("No newline")));
     }
 }
 
