@@ -11,12 +11,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use git::{load_branch_diff, open_repo, refresh_repo, BranchDiff, RepoState};
+use git::{
+    load_branch_diff, load_branch_diff_stat, open_repo, refresh_repo, BranchDiff, RepoState,
+};
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, StackInfo};
 use std::{env, io, mem, path::PathBuf, time::Duration};
 use syntax::SyntaxHighlighter;
-use ui::{draw, BranchEntry, FocusedPane};
+use ui::{draw, BranchEntry, FocusedPane, StackEntry};
 
 fn main() -> Result<()> {
     let repo_arg = env::args().nth(1).map(PathBuf::from);
@@ -43,6 +45,22 @@ struct App {
     search_matches: Vec<usize>,
     search_cursor: usize,
     syntax_highlighter: SyntaxHighlighter,
+    view: AppView,
+    stack_view: Option<StackViewState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppView {
+    BranchList,
+    BranchDetail,
+    StackView,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StackViewState {
+    stack_name: String,
+    entries: Vec<StackEntry>,
+    selected_index: usize,
 }
 
 impl App {
@@ -64,6 +82,8 @@ impl App {
             search_matches: Vec::new(),
             search_cursor: 0,
             syntax_highlighter: SyntaxHighlighter::new(),
+            view: AppView::BranchList,
+            stack_view: None,
         }
     }
 
@@ -101,6 +121,7 @@ impl App {
                         None
                     },
                     self.stack_info.notice(),
+                    self.stack_view.as_ref(),
                 );
             })?;
 
@@ -129,9 +150,10 @@ impl App {
                 break;
             }
 
-            match self.branch_diff {
-                Some(_) => self.handle_detail_keys(key)?,
-                None => self.handle_branch_list_keys(key)?,
+            match self.view {
+                AppView::BranchList => self.handle_branch_list_keys(key)?,
+                AppView::BranchDetail => self.handle_detail_keys(key)?,
+                AppView::StackView => self.handle_stack_view_keys(key)?,
             }
         }
         Ok(())
@@ -145,6 +167,9 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.refresh_repo()?;
+            }
+            KeyCode::Char('2') => {
+                self.open_selected_stack_view()?;
             }
             _ => {}
         }
@@ -165,6 +190,7 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-10)
             }
+            KeyCode::Char('s') => self.open_selected_stack_view()?,
             KeyCode::Enter => self.open_selected_branch()?,
             _ => {}
         }
@@ -184,6 +210,22 @@ impl App {
                 FocusedPane::BranchList => self.handle_branch_list_keys(key)?,
                 FocusedPane::Diff => self.handle_diff_keys(key),
             },
+        }
+        Ok(())
+    }
+
+    fn handle_stack_view_keys(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.view = AppView::BranchList;
+                self.stack_view = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.move_stack_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_stack_selection(-1),
+            KeyCode::Char('g') if key.modifiers.is_empty() => self.jump_stack_view_to_top(),
+            KeyCode::Char('G') => self.jump_stack_view_to_bottom(),
+            KeyCode::Enter => self.open_stack_view_branch()?,
+            _ => {}
         }
         Ok(())
     }
@@ -335,9 +377,79 @@ impl App {
         self.branch_diff = Some(diff);
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
+        self.view = AppView::BranchDetail;
         self.search_matches.clear();
         self.search_cursor = 0;
         Ok(())
+    }
+
+    fn open_selected_stack_view(&mut self) -> Result<()> {
+        let entry = match self.display_entries.get(self.selected_index) {
+            Some(entry) if !entry.is_header() => entry,
+            _ => return Ok(()),
+        };
+
+        let Some(stack) = self.stack_info.stack_for_branch(entry.branch_name()) else {
+            return Ok(());
+        };
+
+        let mut entries = Vec::new();
+        for branch_name in stack.branches.iter().rev() {
+            let Some(branch) = self
+                .repo
+                .branches
+                .iter()
+                .find(|branch| branch.name == *branch_name)
+            else {
+                continue;
+            };
+            let diff_stat = load_branch_diff_stat(&self.repo.root, branch).unwrap_or_default();
+            entries.push(StackEntry {
+                branch_name: branch.name.clone(),
+                commit_count: branch.commit_count,
+                diff_stat,
+                ahead: branch.ahead,
+                behind: branch.behind,
+                has_upstream: branch.upstream.is_some(),
+                is_head: branch.is_head,
+                stale: self.stack_info.is_stale(&self.repo.root, &branch.name),
+            });
+        }
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.stack_view = Some(StackViewState {
+            stack_name: stack.name.clone(),
+            entries,
+            selected_index: 0,
+        });
+        self.view = AppView::StackView;
+        Ok(())
+    }
+
+    fn open_stack_view_branch(&mut self) -> Result<()> {
+        let Some(stack_view) = &self.stack_view else {
+            return Ok(());
+        };
+        let Some(branch_name) = stack_view
+            .entries
+            .get(stack_view.selected_index)
+            .map(|entry| entry.branch_name.clone())
+        else {
+            return Ok(());
+        };
+
+        if let Some(position) = self
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == branch_name)
+        {
+            self.selected_index = position;
+        }
+
+        self.open_selected_branch()
     }
 
     fn close_detail(&mut self) {
@@ -345,6 +457,7 @@ impl App {
         self.highlighted_diff = None;
         self.diff_scroll = 0;
         self.focus = FocusedPane::BranchList;
+        self.view = AppView::BranchList;
         self.search_input.clear();
         self.search_matches.clear();
         self.search_cursor = 0;
@@ -386,7 +499,32 @@ impl App {
             }
         }
 
+        if self.view == AppView::StackView {
+            self.open_selected_stack_view()?;
+        }
+
         Ok(())
+    }
+
+    fn move_stack_selection(&mut self, delta: isize) {
+        let Some(stack_view) = self.stack_view.as_mut() else {
+            return;
+        };
+        let next = stack_view.selected_index as isize + delta;
+        stack_view.selected_index =
+            next.clamp(0, stack_view.entries.len().saturating_sub(1) as isize) as usize;
+    }
+
+    fn jump_stack_view_to_top(&mut self) {
+        if let Some(stack_view) = self.stack_view.as_mut() {
+            stack_view.selected_index = 0;
+        }
+    }
+
+    fn jump_stack_view_to_bottom(&mut self) {
+        if let Some(stack_view) = self.stack_view.as_mut() {
+            stack_view.selected_index = stack_view.entries.len().saturating_sub(1);
+        }
     }
 
     fn scroll_diff(&mut self, delta: isize) {

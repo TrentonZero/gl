@@ -31,6 +31,13 @@ pub struct BranchDiff {
     pub file_positions: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
@@ -142,6 +149,21 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
     ))
 }
 
+pub fn load_branch_diff_stat(root: &Path, branch: &BranchInfo) -> Result<DiffStat> {
+    let Some(base_ref) = &branch.base_ref else {
+        return Ok(DiffStat::default());
+    };
+
+    let merge_base = git(root, ["merge-base", &branch.name, base_ref])?;
+    let merge_base = merge_base.trim();
+    if merge_base.is_empty() {
+        return Ok(DiffStat::default());
+    }
+
+    let shortstat = git(root, ["diff", "--shortstat", merge_base, &branch.name])?;
+    Ok(parse_shortstat(&shortstat))
+}
+
 fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
     let output = git(
         root,
@@ -240,6 +262,34 @@ pub(crate) fn parse_numstat(output: &str) -> HashMap<String, (String, String)> {
         }
     }
     stats
+}
+
+pub(crate) fn parse_shortstat(output: &str) -> DiffStat {
+    let mut stat = DiffStat::default();
+
+    for segment in output.trim().split(',') {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let count = parts
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let label = parts.collect::<Vec<_>>().join(" ");
+
+        if label.contains("file changed") || label.contains("files changed") {
+            stat.files_changed = count;
+        } else if label.contains("insertion") {
+            stat.insertions = count;
+        } else if label.contains("deletion") {
+            stat.deletions = count;
+        }
+    }
+
+    stat
 }
 
 pub(crate) fn parse_diff(
@@ -365,6 +415,37 @@ mod tests {
     #[test]
     fn parse_numstat_empty() {
         assert!(parse_numstat("").is_empty());
+    }
+
+    #[test]
+    fn parse_shortstat_all_fields() {
+        let stat = parse_shortstat("3 files changed, 21 insertions(+), 8 deletions(-)");
+        assert_eq!(
+            stat,
+            DiffStat {
+                files_changed: 3,
+                insertions: 21,
+                deletions: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_shortstat_partial_fields() {
+        let stat = parse_shortstat("1 file changed, 5 insertions(+)");
+        assert_eq!(
+            stat,
+            DiffStat {
+                files_changed: 1,
+                insertions: 5,
+                deletions: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_shortstat_empty() {
+        assert_eq!(parse_shortstat(""), DiffStat::default());
     }
 
     #[test]

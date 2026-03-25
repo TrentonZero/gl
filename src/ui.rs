@@ -1,6 +1,6 @@
 use crate::{
     config::AppConfig,
-    git::{BranchDiff, DiffLineKind, RepoState},
+    git::{BranchDiff, DiffLineKind, DiffStat, RepoState},
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -33,6 +33,18 @@ pub enum BranchEntry {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct StackEntry {
+    pub branch_name: String,
+    pub commit_count: usize,
+    pub diff_stat: DiffStat,
+    pub ahead: usize,
+    pub behind: usize,
+    pub has_upstream: bool,
+    pub is_head: bool,
+    pub stale: bool,
+}
+
 impl BranchEntry {
     pub fn is_header(&self) -> bool {
         matches!(self, BranchEntry::Header { .. })
@@ -59,6 +71,7 @@ pub fn draw(
     focus: FocusedPane,
     search: Option<&str>,
     stack_notice: Option<&str>,
+    stack_view: Option<&crate::StackViewState>,
 ) {
     let frame_area = frame.size();
     let areas = if config.chrome {
@@ -95,6 +108,7 @@ pub fn draw(
         diff_scroll,
         focus,
         stack_notice,
+        stack_view,
     );
 
     if show_help {
@@ -139,14 +153,14 @@ fn draw_help_bar(
     let hints = if detail {
         match focus {
             FocusedPane::BranchList => {
-                "j/k move  J/K stacks  Enter open  Esc close  q quit  ? help"
+                "j/k move  J/K stacks  Enter open  s stack  Esc close  q quit"
             }
             FocusedPane::Diff => {
                 "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  / search  n/N next  Esc list"
             }
         }
     } else {
-        "j/k move  J/K stacks  Enter open  R refresh  q quit  ? help"
+        "j/k move  J/K stacks  Enter open  s stack  2 stack view  R refresh"
     };
 
     let mut line = Line::from(Span::styled(hints, Style::default().fg(Color::Gray)));
@@ -171,7 +185,13 @@ fn draw_body(
     diff_scroll: usize,
     focus: FocusedPane,
     stack_notice: Option<&str>,
+    stack_view: Option<&crate::StackViewState>,
 ) {
+    if let Some(stack_view) = stack_view {
+        draw_stack_view(frame, area, stack_view);
+        return;
+    }
+
     match branch_diff {
         Some(diff) => {
             let panes = Layout::default()
@@ -204,6 +224,36 @@ fn draw_body(
             stack_notice,
         ),
     }
+}
+
+fn draw_stack_view(frame: &mut Frame<'_>, area: Rect, stack_view: &crate::StackViewState) {
+    let items: Vec<ListItem<'_>> = stack_view
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            ListItem::new(render_stack_entry(index, entry, stack_view.entries.len()))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(stack_view.selected_index));
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!("Stack View · {}", stack_view.stack_name))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(51, 70, 124))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ");
+
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_branch_list(
@@ -349,6 +399,61 @@ fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
     }
 }
 
+fn render_stack_entry(index: usize, entry: &StackEntry, total: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    if index + 1 < total {
+        spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+    } else {
+        spans.push(Span::styled("● ", Style::default().fg(Color::DarkGray)));
+    }
+
+    if entry.stale {
+        spans.push(Span::styled("⚠ ", Style::default().fg(Color::Yellow)));
+    } else if entry.is_head {
+        spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+
+    spans.push(Span::styled(
+        format!("{:<20}", entry.branch_name),
+        Style::default().fg(Color::White),
+    ));
+    spans.push(Span::styled(
+        format!(
+            " {:>3}c {:>2}f +{} -{}",
+            entry.commit_count,
+            entry.diff_stat.files_changed,
+            entry.diff_stat.insertions,
+            entry.diff_stat.deletions
+        ),
+        Style::default().fg(Color::Gray),
+    ));
+
+    if entry.ahead == 0 && entry.behind == 0 && entry.has_upstream {
+        spans.push(Span::styled(" ✓", Style::default().fg(Color::Green)));
+    } else {
+        if entry.ahead > 0 {
+            spans.push(Span::styled(
+                format!(" ↑{}", entry.ahead),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        if entry.behind > 0 {
+            spans.push(Span::styled(
+                format!(" ↓{}", entry.behind),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        if !entry.has_upstream {
+            spans.push(Span::styled(" local", Style::default().fg(Color::Yellow)));
+        }
+    }
+
+    Line::from(spans)
+}
+
 fn draw_diff(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -432,7 +537,9 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             Line::from("Global: q quit, ? toggle help, R refresh"),
             Line::from("Branches: j/k move, J/K jump stacks, gg/G ends"),
             Line::from("          Ctrl-d/u half-page, Enter open branch"),
+            Line::from("          s or 2 open Stack View"),
             Line::from("Detail: Esc back to list, Tab focus diff/list"),
+            Line::from("Stack View: j/k move, gg/G ends, Enter open, Esc back"),
             Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G"),
             Line::from("Diff files: J/K jump to next or previous file"),
             Line::from("Search: / start, Enter apply, n/N next or previous"),
