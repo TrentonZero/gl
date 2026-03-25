@@ -648,19 +648,33 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
     }
 
     // Standalone section
-    let standalone: Vec<_> = repo
-        .branches
+    let mut standalone_names: Vec<String> = stack_info
+        .standalone
         .iter()
-        .filter(|b| !used_branches.contains(&b.name))
+        .filter(|name| !used_branches.contains(*name))
+        .cloned()
         .collect();
 
-    if !standalone.is_empty() {
+    for branch in &repo.branches {
+        if !used_branches.contains(&branch.name) && !standalone_names.contains(&branch.name) {
+            standalone_names.push(branch.name.clone());
+        }
+    }
+
+    if !standalone_names.is_empty() {
         if !stack_info.stacks.is_empty() {
             entries.push(BranchEntry::Header {
                 label: "standalone".to_string(),
             });
         }
-        for branch in standalone {
+        for branch_name in standalone_names {
+            let Some(branch) = repo
+                .branches
+                .iter()
+                .find(|branch| branch.name == branch_name)
+            else {
+                continue;
+            };
             entries.push(BranchEntry::Branch {
                 branch_name: branch.name.clone(),
                 is_head: branch.is_head,

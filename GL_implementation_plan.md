@@ -1,6 +1,15 @@
 # GL — Implementation Plan
 
-**Date:** March 18, 2026
+**Date:** March 25, 2026
+
+## Current Status
+
+- Phase 1 is complete.
+- Phase 2 is complete.
+- Phase 3 is complete.
+- Phase 4 is complete, including degraded-mode fallback messaging when Graphite metadata is unavailable.
+- Phase 5 is complete with a dedicated Stack View opened via `s` or `2`.
+- Phases 6 through 12 remain open.
 
 This plan breaks the GL build into phases. Each phase produces a working, testable binary. No phase depends on a later phase, and each one adds visible functionality you can use immediately against a real repository.
 
@@ -83,6 +92,8 @@ This plan breaks the GL build into phases. Each phase produces a working, testab
 5. j/k navigation, gg/G for base/tip.
 
 **Deliverable:** You can see an entire stack's health at a glance and drill into any branch.
+
+**Status:** Complete as of March 25, 2026.
 
 ---
 
