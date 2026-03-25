@@ -500,7 +500,7 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
         });
         for (depth, branch_name) in stack.branches.iter().enumerate() {
             if let Some(branch) = repo.branches.iter().find(|b| b.name == *branch_name) {
-                let stale = stack_info.is_stale(&repo.root, branch_name);
+                let stale = stack_info.is_stale(branch_name);
                 entries.push(BranchEntry::Branch {
                     branch_name: branch_name.clone(),
                     is_head: branch.is_head,
@@ -578,6 +578,7 @@ mod tests {
             stacks: vec![],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
         }
     }
 
@@ -604,6 +605,7 @@ mod tests {
             }],
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
         };
 
         let entries = build_display_entries(&repo, &stacks);
@@ -626,6 +628,7 @@ mod tests {
             }],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
         };
 
         let entries = build_display_entries(&repo, &stacks);

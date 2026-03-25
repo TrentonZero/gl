@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -8,6 +8,7 @@ pub struct StackInfo {
     #[allow(dead_code)]
     pub standalone: Vec<String>,
     pub branch_to_parent: HashMap<String, String>,
+    pub(crate) stale_branches: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,17 +25,8 @@ impl StackInfo {
             .find(|s| s.branches.iter().any(|b| b == branch))
     }
 
-    pub fn is_stale(&self, root: &Path, branch: &str) -> bool {
-        let Some(parent) = self.branch_to_parent.get(branch) else {
-            return false;
-        };
-        let Ok(merge_base) = git_output(root, &["merge-base", branch, parent]) else {
-            return false;
-        };
-        let Ok(parent_tip) = git_output(root, &["rev-parse", parent]) else {
-            return false;
-        };
-        merge_base != parent_tip
+    pub fn is_stale(&self, branch: &str) -> bool {
+        self.stale_branches.contains(branch)
     }
 }
 
@@ -44,6 +36,7 @@ pub fn detect_stacks(root: &Path) -> StackInfo {
             stacks: vec![],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            stale_branches: HashSet::new(),
         };
     }
 
@@ -54,6 +47,7 @@ pub fn detect_stacks(root: &Path) -> StackInfo {
                 stacks: vec![],
                 standalone: vec![],
                 branch_to_parent: HashMap::new(),
+                stale_branches: HashSet::new(),
             }
         }
     };
@@ -138,7 +132,9 @@ fn parse_gt_log(output: &str, root: &Path) -> StackInfo {
         }
     }
 
-    build_stacks_from_parents(&branches, &branch_to_parent)
+    let mut stack_info = build_stacks_from_parents(&branches, &branch_to_parent);
+    stack_info.stale_branches = compute_stale_branches(root, &stack_info.branch_to_parent);
+    stack_info
 }
 
 /// Extract branch names from `gt log short` output, stripping ANSI codes and decorative glyphs.
@@ -262,7 +258,35 @@ pub(crate) fn build_stacks_from_parents(
         stacks,
         standalone,
         branch_to_parent: branch_to_parent.clone(),
+        stale_branches: HashSet::new(),
     }
+}
+
+fn compute_stale_branches(root: &Path, branch_to_parent: &HashMap<String, String>) -> HashSet<String> {
+    let mut stale_branches = HashSet::new();
+    let mut parent_tips: HashMap<String, String> = HashMap::new();
+
+    for (branch, parent) in branch_to_parent {
+        let parent_tip = if let Some(parent_tip) = parent_tips.get(parent) {
+            parent_tip.clone()
+        } else {
+            let Ok(parent_tip) = git_output(root, &["rev-parse", parent]) else {
+                continue;
+            };
+            parent_tips.insert(parent.clone(), parent_tip.clone());
+            parent_tip
+        };
+
+        let Ok(merge_base) = git_output(root, &["merge-base", branch, parent]) else {
+            continue;
+        };
+
+        if merge_base != parent_tip {
+            stale_branches.insert(branch.clone());
+        }
+    }
+
+    stale_branches
 }
 
 pub(crate) fn strip_ansi(input: &str) -> String {
@@ -476,6 +500,7 @@ mod tests {
             }],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
+            stale_branches: HashSet::new(),
         };
         let stack = info.stack_for_branch("auth-ui");
         assert!(stack.is_some());
@@ -488,6 +513,7 @@ mod tests {
             stacks: vec![],
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::new(),
+            stale_branches: HashSet::new(),
         };
         assert!(info.stack_for_branch("main").is_none());
     }
