@@ -234,14 +234,12 @@ fn draw_branch_list(
 
 fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
     match entry {
-        BranchEntry::Header { label } => Line::from(vec![
-            Span::styled(
-                format!(" {label}"),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        BranchEntry::Header { label } => Line::from(vec![Span::styled(
+            format!(" {label}"),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )]),
         BranchEntry::Branch {
             branch_name,
             is_head,
@@ -284,7 +282,10 @@ fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
             } else {
                 format!("{:<width$}", branch_name, width = max_name_len)
             };
-            spans.push(Span::styled(display_name, Style::default().fg(Color::White)));
+            spans.push(Span::styled(
+                display_name,
+                Style::default().fg(Color::White),
+            ));
 
             // Commit count
             if *commit_count > 0 {
@@ -369,7 +370,8 @@ fn visible_plain_diff_lines(
     diff_scroll: usize,
     visible_height: usize,
 ) -> Vec<Line<'static>> {
-    let Some((start, end)) = visible_slice_bounds(diff.lines.len(), diff_scroll, visible_height) else {
+    let Some((start, end)) = visible_slice_bounds(diff.lines.len(), diff_scroll, visible_height)
+    else {
         return Vec::new();
     };
 

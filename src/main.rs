@@ -13,8 +13,14 @@ use crossterm::{
 };
 use git::{load_branch_diff, open_repo, refresh_repo, BranchDiff, RepoState};
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
-use stack::{detect_stacks, StackInfo};
-use std::{env, io, mem, path::PathBuf};
+use stack::{detect_stacks, enrich_stacks, StackInfo};
+use std::{
+    env, io, mem,
+    path::PathBuf,
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::Duration,
+};
 use syntax::SyntaxHighlighter;
 use ui::{draw, BranchEntry, FocusedPane};
 
@@ -25,6 +31,11 @@ fn main() -> Result<()> {
     let stack_info = detect_stacks(&repo.root);
     let mut app = App::new(config, repo, stack_info);
     app.run()
+}
+
+struct StackLoadResult {
+    request_id: usize,
+    stack_info: StackInfo,
 }
 
 struct App {
@@ -43,12 +54,16 @@ struct App {
     search_matches: Vec<usize>,
     search_cursor: usize,
     syntax_highlighter: SyntaxHighlighter,
+    stack_result_tx: Sender<StackLoadResult>,
+    stack_result_rx: Receiver<StackLoadResult>,
+    stack_request_id: usize,
 }
 
 impl App {
     fn new(config: AppConfig, repo: RepoState, stack_info: StackInfo) -> Self {
         let display_entries = build_display_entries(&repo, &stack_info);
-        Self {
+        let (stack_result_tx, stack_result_rx) = mpsc::channel();
+        let mut app = Self {
             config,
             repo,
             stack_info,
@@ -64,7 +79,12 @@ impl App {
             search_matches: Vec::new(),
             search_cursor: 0,
             syntax_highlighter: SyntaxHighlighter::new(),
-        }
+            stack_result_tx,
+            stack_result_rx,
+            stack_request_id: 0,
+        };
+        app.reload_stack_info_async();
+        app
     }
 
     fn run(&mut self) -> Result<()> {
@@ -84,6 +104,10 @@ impl App {
     fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         let mut needs_redraw = true;
         loop {
+            if self.apply_pending_stack_updates() {
+                needs_redraw = true;
+            }
+
             if needs_redraw {
                 terminal.draw(|frame| {
                     draw(
@@ -105,6 +129,10 @@ impl App {
                     );
                 })?;
                 needs_redraw = false;
+            }
+
+            if !event::poll(Duration::from_millis(50))? {
+                continue;
             }
 
             let event = event::read()?;
@@ -309,21 +337,13 @@ impl App {
     }
 
     fn jump_to_first_branch(&mut self) {
-        if let Some(pos) = self
-            .display_entries
-            .iter()
-            .position(|e| !e.is_header())
-        {
+        if let Some(pos) = self.display_entries.iter().position(|e| !e.is_header()) {
             self.selected_index = pos;
         }
     }
 
     fn jump_to_last_branch(&mut self) {
-        if let Some(pos) = self
-            .display_entries
-            .iter()
-            .rposition(|e| !e.is_header())
-        {
+        if let Some(pos) = self.display_entries.iter().rposition(|e| !e.is_header()) {
             self.selected_index = pos;
         }
     }
@@ -367,7 +387,8 @@ impl App {
     fn refresh_repo(&mut self) -> Result<()> {
         self.repo = refresh_repo(&self.repo.root)?;
         self.stack_info = detect_stacks(&self.repo.root);
-        self.display_entries = build_display_entries(&self.repo, &self.stack_info);
+        self.rebuild_display_entries_preserve_selection(None);
+        self.reload_stack_info_async();
 
         // Clamp selected_index to a valid selectable entry
         let selectable: Vec<usize> = self
@@ -401,6 +422,72 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn reload_stack_info_async(&mut self) {
+        self.stack_request_id += 1;
+        let request_id = self.stack_request_id;
+        let root = self.repo.root.clone();
+        let stack_info = self.stack_info.clone();
+        let tx = self.stack_result_tx.clone();
+        thread::spawn(move || {
+            let stack_info = enrich_stacks(&root, &stack_info);
+            let _ = tx.send(StackLoadResult {
+                request_id,
+                stack_info,
+            });
+        });
+    }
+
+    fn apply_pending_stack_updates(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.stack_result_rx.try_recv() {
+            if result.request_id != self.stack_request_id {
+                continue;
+            }
+
+            let selected_branch = self.selected_branch_name().map(ToOwned::to_owned);
+            self.stack_info = result.stack_info;
+            self.rebuild_display_entries_preserve_selection(selected_branch.as_deref());
+            changed = true;
+        }
+        changed
+    }
+
+    fn rebuild_display_entries_preserve_selection(&mut self, branch_name: Option<&str>) {
+        let selected_branch = branch_name
+            .map(ToOwned::to_owned)
+            .or_else(|| self.selected_branch_name().map(ToOwned::to_owned));
+        self.display_entries = build_display_entries(&self.repo, &self.stack_info);
+
+        if let Some(branch_name) = selected_branch {
+            if let Some(index) = self
+                .display_entries
+                .iter()
+                .position(|entry| !entry.is_header() && entry.branch_name() == branch_name)
+            {
+                self.selected_index = index;
+                return;
+            }
+        }
+
+        self.selected_index = self
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header())
+            .unwrap_or(0);
+    }
+
+    fn selected_branch_name(&self) -> Option<&str> {
+        self.display_entries
+            .get(self.selected_index)
+            .and_then(|entry| {
+                if entry.is_header() {
+                    None
+                } else {
+                    Some(entry.branch_name())
+                }
+            })
     }
 
     fn scroll_diff(&mut self, delta: isize) {
@@ -499,6 +586,11 @@ impl App {
 fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<BranchEntry> {
     let mut entries = Vec::new();
     let mut used_branches = std::collections::HashSet::new();
+    let branch_map: std::collections::HashMap<_, _> = repo
+        .branches
+        .iter()
+        .map(|branch| (&branch.name, branch))
+        .collect();
 
     // Stacked branches
     for stack in &stack_info.stacks {
@@ -506,7 +598,7 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
             label: stack.name.clone(),
         });
         for (depth, branch_name) in stack.branches.iter().enumerate() {
-            if let Some(branch) = repo.branches.iter().find(|b| b.name == *branch_name) {
+            if let Some(branch) = branch_map.get(branch_name) {
                 let stale = stack_info.is_stale(branch_name);
                 entries.push(BranchEntry::Branch {
                     branch_name: branch_name.clone(),
@@ -523,22 +615,36 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
         }
     }
 
-    // Standalone section
-    let standalone: Vec<_> = repo
-        .branches
-        .iter()
-        .filter(|b| !used_branches.contains(&b.name))
-        .collect();
+    let mut standalone_names = Vec::new();
+    let mut seen_standalone = std::collections::HashSet::new();
+    if !stack_info.standalone.is_empty() {
+        for name in &stack_info.standalone {
+            if branch_map.contains_key(name) && !used_branches.contains(name) {
+                standalone_names.push(name.clone());
+                seen_standalone.insert(name.clone());
+            }
+        }
+    }
+    standalone_names.extend(
+        repo.branches
+            .iter()
+            .filter(|branch| !used_branches.contains(&branch.name))
+            .map(|branch| branch.name.clone())
+            .filter(|name| !seen_standalone.contains(name)),
+    );
 
-    if !standalone.is_empty() {
+    if !standalone_names.is_empty() {
         if !stack_info.stacks.is_empty() {
             entries.push(BranchEntry::Header {
                 label: "standalone".to_string(),
             });
         }
-        for branch in standalone {
+        for branch_name in standalone_names {
+            let Some(branch) = branch_map.get(&branch_name) else {
+                continue;
+            };
             entries.push(BranchEntry::Branch {
-                branch_name: branch.name.clone(),
+                branch_name,
                 is_head: branch.is_head,
                 commit_count: branch.commit_count,
                 ahead: branch.ahead,
@@ -660,6 +766,21 @@ mod tests {
         let stacks = empty_stacks();
         let entries = build_display_entries(&repo, &stacks);
         assert!(entries.iter().all(|e| !e.is_header()));
+    }
+
+    #[test]
+    fn display_entries_use_stack_standalone_order() {
+        let repo = make_repo(&["main", "fix", "topic"]);
+        let stacks = StackInfo {
+            stacks: vec![],
+            standalone: vec!["topic".into(), "main".into(), "fix".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+        };
+
+        let entries = build_display_entries(&repo, &stacks);
+        let names: Vec<_> = entries.iter().map(BranchEntry::branch_name).collect();
+        assert_eq!(names, vec!["topic", "main", "fix"]);
     }
 
     // --- selection navigation helpers ---

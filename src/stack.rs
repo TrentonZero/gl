@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 #[derive(Debug, Clone)]
 pub struct StackInfo {
@@ -28,41 +30,42 @@ impl StackInfo {
     pub fn is_stale(&self, branch: &str) -> bool {
         self.stale_branches.contains(branch)
     }
-}
 
-pub fn detect_stacks(root: &Path) -> StackInfo {
-    if !gt_available() {
-        return StackInfo {
+    pub fn empty() -> Self {
+        Self {
             stacks: vec![],
             standalone: vec![],
             branch_to_parent: HashMap::new(),
             stale_branches: HashSet::new(),
-        };
-    }
-
-    let output = match gt_log_short(root) {
-        Some(output) => output,
-        None => {
-            return StackInfo {
-                stacks: vec![],
-                standalone: vec![],
-                branch_to_parent: HashMap::new(),
-                stale_branches: HashSet::new(),
-            }
         }
-    };
-
-    parse_gt_log(&output, root)
+    }
 }
 
-fn gt_available() -> bool {
-    Command::new("gt")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+pub fn detect_stacks(root: &Path) -> StackInfo {
+    let output = match gt_log_short(root) {
+        Some(output) => output,
+        None => return StackInfo::empty(),
+    };
+
+    parse_gt_log(&output)
+}
+
+pub fn enrich_stacks(root: &Path, stack_info: &StackInfo) -> StackInfo {
+    if stack_info.stacks.is_empty() {
+        return stack_info.clone();
+    }
+
+    let branches: Vec<String> = stack_info
+        .stacks
+        .iter()
+        .flat_map(|stack| stack.branches.iter().cloned())
+        .collect();
+    let branch_to_parent = load_branch_parents(root.to_path_buf(), branches);
+
+    let mut enriched = stack_info.clone();
+    enriched.branch_to_parent = branch_to_parent.clone();
+    enriched.stale_branches = compute_stale_branches(root.to_path_buf(), branch_to_parent);
+    enriched
 }
 
 fn gt_log_short(root: &Path) -> Option<String> {
@@ -117,24 +120,20 @@ fn gt_branch_parent(root: &Path, branch: &str) -> Option<String> {
 ///
 /// Branches above trunk (main/master) that appear in a contiguous sequence
 /// form a stack. The trunk branch itself is standalone.
-fn parse_gt_log(output: &str, root: &Path) -> StackInfo {
+fn parse_gt_log(output: &str) -> StackInfo {
     let branches = parse_branch_names(output);
+    build_stacks_from_order(&branches)
+}
 
-    // Build parent relationships using gt branch info for each non-trunk branch
-    let trunk = detect_trunk(&branches);
-    let mut branch_to_parent: HashMap<String, String> = HashMap::new();
-    for branch in &branches {
-        if Some(branch.as_str()) == trunk.as_deref() {
-            continue;
-        }
-        if let Some(parent) = gt_branch_parent(root, branch) {
-            branch_to_parent.insert(branch.clone(), parent);
-        }
+fn load_branch_parents(root: PathBuf, branches: Vec<String>) -> HashMap<String, String> {
+    let mut branch_to_parent = HashMap::new();
+    for (branch, parent) in run_in_worker_pool(branches, move |branch| {
+        gt_branch_parent(&root, &branch).map(|parent| (branch, parent))
+    }) {
+        branch_to_parent.insert(branch, parent);
     }
 
-    let mut stack_info = build_stacks_from_parents(&branches, &branch_to_parent);
-    stack_info.stale_branches = compute_stale_branches(root, &stack_info.branch_to_parent);
-    stack_info
+    branch_to_parent
 }
 
 /// Extract branch names from `gt log short` output, stripping ANSI codes and decorative glyphs.
@@ -185,6 +184,7 @@ pub(crate) fn detect_trunk(branches: &[String]) -> Option<String> {
 }
 
 /// Build stack groupings from a list of branches and their parent relationships.
+#[allow(dead_code)]
 pub(crate) fn build_stacks_from_parents(
     branches: &[String],
     branch_to_parent: &HashMap<String, String>,
@@ -262,31 +262,126 @@ pub(crate) fn build_stacks_from_parents(
     }
 }
 
-fn compute_stale_branches(root: &Path, branch_to_parent: &HashMap<String, String>) -> HashSet<String> {
-    let mut stale_branches = HashSet::new();
-    let mut parent_tips: HashMap<String, String> = HashMap::new();
+pub(crate) fn build_stacks_from_order(branches: &[String]) -> StackInfo {
+    let trunk = detect_trunk(branches);
+    let mut stacks = Vec::new();
+    let mut standalone = Vec::new();
+    let mut current_run = Vec::new();
 
-    for (branch, parent) in branch_to_parent {
-        let parent_tip = if let Some(parent_tip) = parent_tips.get(parent) {
-            parent_tip.clone()
+    let flush_run =
+        |run: &mut Vec<String>, stacks: &mut Vec<Stack>, standalone: &mut Vec<String>| {
+            if run.is_empty() {
+                return;
+            }
+
+            if run.len() > 1 {
+                let ordered: Vec<String> = run.iter().rev().cloned().collect();
+                let name = format!("{} stack", ordered.first().unwrap());
+                stacks.push(Stack {
+                    name,
+                    branches: ordered,
+                });
+            } else {
+                standalone.push(run[0].clone());
+            }
+            run.clear();
+        };
+
+    for branch in branches {
+        if Some(branch.as_str()) == trunk.as_deref() {
+            flush_run(&mut current_run, &mut stacks, &mut standalone);
+            standalone.push(branch.clone());
         } else {
-            let Ok(parent_tip) = git_output(root, &["rev-parse", parent]) else {
-                continue;
-            };
-            parent_tips.insert(parent.clone(), parent_tip.clone());
-            parent_tip
-        };
-
-        let Ok(merge_base) = git_output(root, &["merge-base", branch, parent]) else {
-            continue;
-        };
-
-        if merge_base != parent_tip {
-            stale_branches.insert(branch.clone());
+            current_run.push(branch.clone());
         }
     }
 
+    flush_run(&mut current_run, &mut stacks, &mut standalone);
+
+    StackInfo {
+        stacks,
+        standalone,
+        branch_to_parent: HashMap::new(),
+        stale_branches: HashSet::new(),
+    }
+}
+
+fn compute_stale_branches(
+    root: PathBuf,
+    branch_to_parent: HashMap<String, String>,
+) -> HashSet<String> {
+    let mut stale_branches = HashSet::new();
+    for branch in run_in_worker_pool(
+        branch_to_parent.into_iter().collect(),
+        move |(branch, parent)| {
+            let Ok(parent_tip) = git_output(&root, &["rev-parse", &parent]) else {
+                return None;
+            };
+            let Ok(merge_base) = git_output(&root, &["merge-base", &branch, &parent]) else {
+                return None;
+            };
+            (merge_base != parent_tip).then_some(branch)
+        },
+    ) {
+        stale_branches.insert(branch);
+    }
+
     stale_branches
+}
+
+fn run_in_worker_pool<I, O, F>(items: Vec<I>, worker: F) -> Vec<O>
+where
+    I: Send + 'static,
+    O: Send + 'static,
+    F: Fn(I) -> Option<O> + Send + Sync + 'static,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = worker_pool_size(items.len());
+    let queue = Arc::new(Mutex::new(items));
+    let worker = Arc::new(worker);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let queue = Arc::clone(&queue);
+        let worker = Arc::clone(&worker);
+        handles.push(thread::spawn(move || {
+            let mut results = Vec::new();
+            loop {
+                let next_item = {
+                    let mut queue = queue.lock().ok()?;
+                    queue.pop()
+                };
+
+                let Some(item) = next_item else {
+                    break;
+                };
+
+                if let Some(output) = worker(item) {
+                    results.push(output);
+                }
+            }
+            Some(results)
+        }));
+    }
+
+    let mut outputs = Vec::new();
+    for handle in handles {
+        if let Ok(Some(mut results)) = handle.join() {
+            outputs.append(&mut results);
+        }
+    }
+
+    outputs
+}
+
+fn worker_pool_size(job_count: usize) -> usize {
+    let available = thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(4);
+    available.clamp(2, 8).min(job_count)
 }
 
 pub(crate) fn strip_ansi(input: &str) -> String {
@@ -487,6 +582,16 @@ mod tests {
         let info = build_stacks_from_parents(&[], &HashMap::new());
         assert!(info.stacks.is_empty());
         assert!(info.standalone.is_empty());
+    }
+
+    #[test]
+    fn build_stacks_from_order_groups_contiguous_non_trunk_runs() {
+        let branches = vec!["feat/top".into(), "feat/base".into(), "main".into(), "fix".into()];
+
+        let info = build_stacks_from_order(&branches);
+        assert_eq!(info.stacks.len(), 1);
+        assert_eq!(info.stacks[0].branches, vec!["feat/base", "feat/top"]);
+        assert_eq!(info.standalone, vec!["main", "fix"]);
     }
 
     // --- StackInfo::stack_for_branch ---
