@@ -14,7 +14,7 @@ use crossterm::{
 use git::{load_branch_diff, open_repo, refresh_repo, BranchDiff, RepoState};
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, StackInfo};
-use std::{env, io, mem, path::PathBuf, time::Duration};
+use std::{env, io, mem, path::PathBuf};
 use syntax::SyntaxHighlighter;
 use ui::{draw, BranchEntry, FocusedPane};
 
@@ -82,32 +82,36 @@ impl App {
     }
 
     fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+        let mut needs_redraw = true;
         loop {
-            terminal.draw(|frame| {
-                draw(
-                    frame,
-                    &self.config,
-                    &self.repo,
-                    &self.display_entries,
-                    self.selected_index,
-                    self.branch_diff.as_ref(),
-                    self.highlighted_diff.as_deref(),
-                    self.diff_scroll,
-                    self.show_help,
-                    self.focus,
-                    if self.search_mode {
-                        Some(self.search_input.as_str())
-                    } else {
-                        None
-                    },
-                );
-            })?;
-
-            if !event::poll(Duration::from_millis(100))? {
-                continue;
+            if needs_redraw {
+                terminal.draw(|frame| {
+                    draw(
+                        frame,
+                        &self.config,
+                        &self.repo,
+                        &self.display_entries,
+                        self.selected_index,
+                        self.branch_diff.as_ref(),
+                        self.highlighted_diff.as_deref(),
+                        self.diff_scroll,
+                        self.show_help,
+                        self.focus,
+                        if self.search_mode {
+                            Some(self.search_input.as_str())
+                        } else {
+                            None
+                        },
+                    );
+                })?;
+                needs_redraw = false;
             }
 
-            let Event::Key(key) = event::read()? else {
+            let event = event::read()?;
+            let Event::Key(key) = event else {
+                if matches!(event, Event::Resize(_, _)) {
+                    needs_redraw = true;
+                }
                 continue;
             };
             if key.kind != KeyEventKind::Press {
@@ -116,11 +120,13 @@ impl App {
 
             if self.search_mode {
                 self.handle_search_input(key);
+                needs_redraw = true;
                 continue;
             }
 
             if self.show_help {
                 self.show_help = false;
+                needs_redraw = true;
                 continue;
             }
 
@@ -132,6 +138,7 @@ impl App {
                 Some(_) => self.handle_detail_keys(key)?,
                 None => self.handle_branch_list_keys(key)?,
             }
+            needs_redraw = true;
         }
         Ok(())
     }
