@@ -1,6 +1,6 @@
 use crate::{
     config::AppConfig,
-    git::{BranchDiff, BranchInfo, DiffLineKind, RepoState},
+    git::{BranchDiff, DiffLineKind, RepoState},
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -16,10 +16,41 @@ pub enum FocusedPane {
     Diff,
 }
 
+#[derive(Debug, Clone)]
+pub enum BranchEntry {
+    Header {
+        label: String,
+    },
+    Branch {
+        branch_name: String,
+        is_head: bool,
+        commit_count: usize,
+        ahead: usize,
+        behind: usize,
+        has_upstream: bool,
+        indent: usize,
+        stale: bool,
+    },
+}
+
+impl BranchEntry {
+    pub fn is_header(&self) -> bool {
+        matches!(self, BranchEntry::Header { .. })
+    }
+
+    pub fn branch_name(&self) -> &str {
+        match self {
+            BranchEntry::Branch { branch_name, .. } => branch_name,
+            BranchEntry::Header { label } => label,
+        }
+    }
+}
+
 pub fn draw(
     frame: &mut Frame<'_>,
     config: &AppConfig,
     repo: &RepoState,
+    display_entries: &[BranchEntry],
     selected_index: usize,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
@@ -56,7 +87,7 @@ pub fn draw(
     draw_body(
         frame,
         areas[1],
-        repo,
+        display_entries,
         selected_index,
         branch_diff,
         highlighted_diff,
@@ -105,13 +136,15 @@ fn draw_help_bar(
 ) {
     let hints = if detail {
         match focus {
-            FocusedPane::BranchList => "j/k move  Enter open  Esc close  q quit  ? help",
+            FocusedPane::BranchList => {
+                "j/k move  J/K stacks  Enter open  Esc close  q quit  ? help"
+            }
             FocusedPane::Diff => {
                 "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  / search  n/N next  Esc list"
             }
         }
     } else {
-        "j/k move  Enter open  R refresh  q quit  ? help"
+        "j/k move  J/K stacks  Enter open  R refresh  q quit  ? help"
     };
 
     let mut line = Line::from(Span::styled(hints, Style::default().fg(Color::Gray)));
@@ -129,7 +162,7 @@ fn draw_help_bar(
 fn draw_body(
     frame: &mut Frame<'_>,
     area: Rect,
-    repo: &RepoState,
+    display_entries: &[BranchEntry],
     selected_index: usize,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
@@ -145,7 +178,7 @@ fn draw_body(
             draw_branch_list(
                 frame,
                 panes[0],
-                repo,
+                display_entries,
                 selected_index,
                 focus == FocusedPane::BranchList,
             );
@@ -158,21 +191,20 @@ fn draw_body(
                 focus == FocusedPane::Diff,
             );
         }
-        None => draw_branch_list(frame, area, repo, selected_index, true),
+        None => draw_branch_list(frame, area, display_entries, selected_index, true),
     }
 }
 
 fn draw_branch_list(
     frame: &mut Frame<'_>,
     area: Rect,
-    repo: &RepoState,
+    display_entries: &[BranchEntry],
     selected_index: usize,
     focused: bool,
 ) {
-    let items: Vec<ListItem<'_>> = repo
-        .branches
+    let items: Vec<ListItem<'_>> = display_entries
         .iter()
-        .map(branch_list_item)
+        .map(branch_entry_item)
         .map(ListItem::new)
         .collect();
 
@@ -200,44 +232,89 @@ fn draw_branch_list(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn branch_list_item(branch: &BranchInfo) -> Line<'static> {
-    let mut spans = Vec::new();
-    if branch.is_head {
-        spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
-    } else {
-        spans.push(Span::raw("  "));
-    }
+fn branch_entry_item(entry: &BranchEntry) -> Line<'static> {
+    match entry {
+        BranchEntry::Header { label } => Line::from(vec![
+            Span::styled(
+                format!(" {label}"),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        BranchEntry::Branch {
+            branch_name,
+            is_head,
+            commit_count,
+            ahead,
+            behind,
+            has_upstream,
+            indent,
+            stale,
+        } => {
+            let mut spans = Vec::new();
 
-    spans.push(Span::styled(
-        format!("{:<20}", branch.name),
-        Style::default().fg(Color::White),
-    ));
+            // Indentation with connecting line
+            if *indent > 0 {
+                for i in 0..*indent {
+                    if i == indent - 1 {
+                        spans.push(Span::styled("├ ", Style::default().fg(Color::DarkGray)));
+                    } else {
+                        spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+                    }
+                }
+            }
 
-    if branch.commit_count > 0 {
-        spans.push(Span::styled(
-            format!(" {:>3}c", branch.commit_count),
-            Style::default().fg(Color::Gray),
-        ));
-    }
+            // Stale indicator
+            if *stale {
+                spans.push(Span::styled("⚠ ", Style::default().fg(Color::Yellow)));
+            }
 
-    if branch.ahead == 0 && branch.behind == 0 && branch.upstream.is_some() {
-        spans.push(Span::styled(" ✓", Style::default().fg(Color::Green)));
-    } else {
-        if branch.ahead > 0 {
-            spans.push(Span::styled(
-                format!(" ↑{}", branch.ahead),
-                Style::default().fg(Color::Green),
-            ));
+            // Head indicator
+            if *is_head {
+                spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
+            } else if !*stale {
+                spans.push(Span::raw("  "));
+            }
+
+            // Branch name - truncate to fit
+            let max_name_len = if *indent > 0 { 20 - indent * 2 } else { 20 };
+            let display_name = if branch_name.len() > max_name_len {
+                format!("{:.width$}", branch_name, width = max_name_len)
+            } else {
+                format!("{:<width$}", branch_name, width = max_name_len)
+            };
+            spans.push(Span::styled(display_name, Style::default().fg(Color::White)));
+
+            // Commit count
+            if *commit_count > 0 {
+                spans.push(Span::styled(
+                    format!(" {:>3}c", commit_count),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+
+            // Sync status
+            if *ahead == 0 && *behind == 0 && *has_upstream {
+                spans.push(Span::styled(" ✓", Style::default().fg(Color::Green)));
+            } else {
+                if *ahead > 0 {
+                    spans.push(Span::styled(
+                        format!(" ↑{}", ahead),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+                if *behind > 0 {
+                    spans.push(Span::styled(
+                        format!(" ↓{}", behind),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+            }
+
+            Line::from(spans)
         }
-        if branch.behind > 0 {
-            spans.push(Span::styled(
-                format!(" ↓{}", branch.behind),
-                Style::default().fg(Color::Red),
-            ));
-        }
     }
-
-    Line::from(spans)
 }
 
 fn draw_diff(
@@ -309,7 +386,7 @@ fn render_diff_line(index: usize, line: &crate::git::DiffLine) -> Line<'static> 
 }
 
 fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered_rect(72, 16, area);
+    let popup = centered_rect(72, 18, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(vec![
@@ -321,13 +398,14 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             )),
             Line::from(""),
             Line::from("Global: q quit, ? toggle help, R refresh"),
-            Line::from("Branches: j/k move, Enter open branch"),
+            Line::from("Branches: j/k move, J/K jump stacks, gg/G ends"),
+            Line::from("          Ctrl-d/u half-page, Enter open branch"),
             Line::from("Detail: Esc back to list, Tab focus diff/list"),
             Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G"),
             Line::from("Diff files: J/K jump to next or previous file"),
             Line::from("Search: / start, Enter apply, n/N next or previous"),
             Line::from(""),
-            Line::from("This build implements implementation plan phases 1 and 2."),
+            Line::from("Stack groups shown when Graphite CLI (gt) is available."),
         ])
         .block(Block::default().title("Help").borders(Borders::ALL))
         .alignment(Alignment::Left)
@@ -340,4 +418,201 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- BranchEntry ---
+
+    #[test]
+    fn header_is_header() {
+        let entry = BranchEntry::Header {
+            label: "test".into(),
+        };
+        assert!(entry.is_header());
+    }
+
+    #[test]
+    fn branch_is_not_header() {
+        let entry = BranchEntry::Branch {
+            branch_name: "main".into(),
+            is_head: false,
+            commit_count: 0,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 0,
+            stale: false,
+        };
+        assert!(!entry.is_header());
+    }
+
+    #[test]
+    fn branch_name_on_branch() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feature/auth".into(),
+            is_head: false,
+            commit_count: 0,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 0,
+            stale: false,
+        };
+        assert_eq!(entry.branch_name(), "feature/auth");
+    }
+
+    #[test]
+    fn branch_name_on_header() {
+        let entry = BranchEntry::Header {
+            label: "my stack".into(),
+        };
+        assert_eq!(entry.branch_name(), "my stack");
+    }
+
+    // --- centered_rect ---
+
+    #[test]
+    fn centered_rect_centers_in_area() {
+        let area = Rect::new(0, 0, 100, 50);
+        let popup = centered_rect(40, 20, area);
+        assert_eq!(popup.x, 30);
+        assert_eq!(popup.y, 15);
+        assert_eq!(popup.width, 40);
+        assert_eq!(popup.height, 20);
+    }
+
+    #[test]
+    fn centered_rect_clamps_to_area() {
+        let area = Rect::new(0, 0, 20, 10);
+        let popup = centered_rect(40, 20, area);
+        assert_eq!(popup.width, 20);
+        assert_eq!(popup.height, 10);
+    }
+
+    #[test]
+    fn centered_rect_with_offset_area() {
+        let area = Rect::new(10, 5, 80, 40);
+        let popup = centered_rect(40, 20, area);
+        assert_eq!(popup.x, 30); // 10 + (80-40)/2
+        assert_eq!(popup.y, 15); // 5 + (40-20)/2
+    }
+
+    // --- branch_entry_item rendering ---
+
+    #[test]
+    fn header_item_contains_label() {
+        let entry = BranchEntry::Header {
+            label: "auth stack".into(),
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("auth stack"));
+    }
+
+    #[test]
+    fn branch_item_shows_head_indicator() {
+        let entry = BranchEntry::Branch {
+            branch_name: "main".into(),
+            is_head: true,
+            commit_count: 0,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 0,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("●"));
+    }
+
+    #[test]
+    fn branch_item_shows_commit_count() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feat".into(),
+            is_head: false,
+            commit_count: 5,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 0,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("5c"));
+    }
+
+    #[test]
+    fn branch_item_shows_synced_check() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feat".into(),
+            is_head: false,
+            commit_count: 1,
+            ahead: 0,
+            behind: 0,
+            has_upstream: true,
+            indent: 0,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("✓"));
+    }
+
+    #[test]
+    fn branch_item_shows_ahead_behind() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feat".into(),
+            is_head: false,
+            commit_count: 1,
+            ahead: 3,
+            behind: 2,
+            has_upstream: true,
+            indent: 0,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("↑3"));
+        assert!(text.contains("↓2"));
+    }
+
+    #[test]
+    fn branch_item_shows_stale_indicator() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feat".into(),
+            is_head: false,
+            commit_count: 1,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 1,
+            stale: true,
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("⚠"));
+    }
+
+    #[test]
+    fn branch_item_shows_indentation() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feat".into(),
+            is_head: false,
+            commit_count: 0,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 2,
+            stale: false,
+        };
+        let line = branch_entry_item(&entry);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("│"));
+        assert!(text.contains("├"));
+    }
 }

@@ -2,6 +2,7 @@
 
 A terminal UI for browsing git diffs by branch.
 
+update
 ## Prerequisites
 
 - [Rust toolchain](https://rustup.rs/) (1.70+)

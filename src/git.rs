@@ -228,7 +228,7 @@ fn commit_count_above(root: &Path, branch: &str, base_ref: &str) -> Result<usize
     Ok(count.trim().parse::<usize>().unwrap_or(0))
 }
 
-fn parse_numstat(output: &str) -> HashMap<String, (String, String)> {
+pub(crate) fn parse_numstat(output: &str) -> HashMap<String, (String, String)> {
     let mut stats = HashMap::new();
     for line in output.lines() {
         let mut parts = line.split('\t');
@@ -242,7 +242,7 @@ fn parse_numstat(output: &str) -> HashMap<String, (String, String)> {
     stats
 }
 
-fn parse_diff(
+pub(crate) fn parse_diff(
     branch_name: String,
     base_ref: Option<String>,
     patch: &str,
@@ -341,6 +341,217 @@ fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_numstat_basic() {
+        let input = "10\t5\tsrc/main.rs\n3\t1\tsrc/lib.rs\n";
+        let stats = parse_numstat(input);
+        assert_eq!(stats.len(), 2);
+        assert_eq!(
+            stats.get("src/main.rs"),
+            Some(&("10".to_string(), "5".to_string()))
+        );
+        assert_eq!(
+            stats.get("src/lib.rs"),
+            Some(&("3".to_string(), "1".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_numstat_empty() {
+        assert!(parse_numstat("").is_empty());
+    }
+
+    #[test]
+    fn parse_numstat_binary_file() {
+        let input = "-\t-\timage.png\n";
+        let stats = parse_numstat(input);
+        assert_eq!(
+            stats.get("image.png"),
+            Some(&("-".to_string(), "-".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_diff_empty_patch() {
+        let diff = parse_diff("feature".into(), Some("main".into()), "", &HashMap::new());
+        assert_eq!(diff.branch_name, "feature");
+        assert_eq!(diff.base_ref.as_deref(), Some("main"));
+        assert_eq!(diff.lines.len(), 1);
+        assert_eq!(diff.lines[0].kind, DiffLineKind::Meta);
+        assert!(diff.lines[0].text.contains("identical"));
+    }
+
+    #[test]
+    fn parse_diff_single_file_add() {
+        let patch = "\
+diff --git a/hello.txt b/hello.txt
+new file mode 100644
+index 0000000..ce01362
+--- /dev/null
++++ b/hello.txt
+@@ -0,0 +1,2 @@
++hello
++world";
+        let mut stats = HashMap::new();
+        stats.insert("hello.txt".to_string(), ("2".to_string(), "0".to_string()));
+
+        let diff = parse_diff("feat".into(), Some("main".into()), patch, &stats);
+        assert_eq!(diff.branch_name, "feat");
+        assert_eq!(diff.file_positions, vec![0]);
+
+        // File header
+        assert_eq!(diff.lines[0].kind, DiffLineKind::File);
+        assert!(diff.lines[0].text.contains("hello.txt"));
+        assert!(diff.lines[0].text.contains("+2"));
+
+        // Hunk header
+        assert_eq!(diff.lines[1].kind, DiffLineKind::Hunk);
+
+        // Added lines
+        assert_eq!(diff.lines[2].kind, DiffLineKind::Add);
+        assert_eq!(diff.lines[2].text, "+hello");
+        assert_eq!(diff.lines[3].kind, DiffLineKind::Add);
+        assert_eq!(diff.lines[3].text, "+world");
+    }
+
+    #[test]
+    fn parse_diff_modification() {
+        let patch = "\
+diff --git a/src/lib.rs b/src/lib.rs
+index abc1234..def5678 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    println!(\"hello\");
++    println!(\"world\");
+ }";
+        let mut stats = HashMap::new();
+        stats.insert(
+            "src/lib.rs".to_string(),
+            ("1".to_string(), "1".to_string()),
+        );
+
+        let diff = parse_diff("fix".into(), None, patch, &stats);
+        assert_eq!(diff.file_positions, vec![0]);
+        assert_eq!(diff.lines[0].kind, DiffLineKind::File);
+        assert!(diff.lines[0].text.contains("src/lib.rs"));
+
+        // Context, del, add, context
+        assert_eq!(diff.lines[2].kind, DiffLineKind::Context);
+        assert_eq!(diff.lines[3].kind, DiffLineKind::Del);
+        assert_eq!(diff.lines[4].kind, DiffLineKind::Add);
+        assert_eq!(diff.lines[5].kind, DiffLineKind::Context);
+    }
+
+    #[test]
+    fn parse_diff_multiple_files() {
+        let patch = "\
+diff --git a/a.txt b/a.txt
+index 1111..2222 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+diff --git a/b.txt b/b.txt
+index 3333..4444 100644
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-foo
++bar";
+        let stats = HashMap::new();
+        let diff = parse_diff("multi".into(), Some("main".into()), patch, &stats);
+        assert_eq!(diff.file_positions.len(), 2);
+        assert_eq!(diff.lines[diff.file_positions[0]].kind, DiffLineKind::File);
+        assert!(diff.lines[diff.file_positions[0]].text.contains("a.txt"));
+        assert_eq!(diff.lines[diff.file_positions[1]].kind, DiffLineKind::File);
+        assert!(diff.lines[diff.file_positions[1]].text.contains("b.txt"));
+    }
+
+    #[test]
+    fn parse_diff_binary_file() {
+        let patch = "\
+diff --git a/image.png b/image.png
+index 1111..2222 100644
+Binary files a/image.png and b/image.png differ";
+        let stats = HashMap::new();
+        let diff = parse_diff("bin".into(), None, patch, &stats);
+        assert!(diff
+            .lines
+            .iter()
+            .any(|l| l.kind == DiffLineKind::Meta && l.text.contains("binary")));
+    }
+
+    #[test]
+    fn parse_diff_rename() {
+        let patch = "\
+diff --git a/old_name.rs b/new_name.rs
+similarity index 95%
+rename from old_name.rs
+rename to new_name.rs
+index 1111..2222 100644
+--- a/old_name.rs
++++ b/new_name.rs
+@@ -1 +1 @@
+-old
++new";
+        let stats = HashMap::new();
+        let diff = parse_diff("rename".into(), None, patch, &stats);
+        // rename from/to lines should be skipped, file header emitted
+        assert_eq!(diff.file_positions.len(), 1);
+        assert_eq!(diff.lines[0].kind, DiffLineKind::File);
+    }
+
+    #[test]
+    fn parse_diff_file_path_on_lines() {
+        let patch = "\
+diff --git a/foo.rs b/foo.rs
+index 1111..2222 100644
+--- a/foo.rs
++++ b/foo.rs
+@@ -1 +1 @@
+-old
++new";
+        let stats = HashMap::new();
+        let diff = parse_diff("fp".into(), None, patch, &stats);
+        // Code lines should have file_path set
+        for line in &diff.lines {
+            if matches!(line.kind, DiffLineKind::Add | DiffLineKind::Del) {
+                assert_eq!(line.file_path.as_deref(), Some("foo.rs"));
+            }
+        }
+    }
+
+    #[test]
+    fn parse_diff_no_newline_marker() {
+        let patch = "\
+diff --git a/a.txt b/a.txt
+index 1111..2222 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+\\ No newline at end of file";
+        let stats = HashMap::new();
+        let diff = parse_diff("nonl".into(), None, patch, &stats);
+        let meta_lines: Vec<_> = diff
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Meta)
+            .collect();
+        assert!(meta_lines
+            .iter()
+            .any(|l| l.text.contains("No newline")));
+    }
 }
 
 fn discover_repo_root(start: &Path) -> Result<PathBuf> {
