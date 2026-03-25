@@ -53,6 +53,8 @@ struct RawBranch {
     name: String,
     is_head: bool,
     upstream: Option<String>,
+    ahead: usize,
+    behind: usize,
 }
 
 pub fn open_repo(path: Option<PathBuf>) -> Result<RepoState> {
@@ -68,10 +70,6 @@ pub fn refresh_repo(root: &Path) -> Result<RepoState> {
     let mut branches = Vec::with_capacity(raw_branches.len());
     for raw in raw_branches {
         let base_ref = raw.upstream.clone().or_else(|| default_base.clone());
-        let (ahead, behind) = match &raw.upstream {
-            Some(upstream) => ahead_behind(root, &raw.name, upstream).unwrap_or((0, 0)),
-            None => (0, 0),
-        };
         let commit_count = match &base_ref {
             Some(base) => commit_count_above(root, &raw.name, base).unwrap_or(0),
             None => 0,
@@ -81,8 +79,8 @@ pub fn refresh_repo(root: &Path) -> Result<RepoState> {
             name: raw.name,
             is_head: raw.is_head,
             upstream: raw.upstream,
-            ahead,
-            behind,
+            ahead: raw.ahead,
+            behind: raw.behind,
             commit_count,
             base_ref,
         });
@@ -148,7 +146,7 @@ fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
         [
             "for-each-ref",
             "refs/heads",
-            "--format=%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(objectname)",
+            "--format=%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(upstream:track)\t%(objectname)",
         ],
     )?;
 
@@ -165,12 +163,15 @@ fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+        let (ahead, behind) = parts.next().map(parse_upstream_track).unwrap_or((0, 0));
         let _ = parts.next();
 
         branches.push(RawBranch {
             name,
             is_head: head_marker == "*",
             upstream,
+            ahead,
+            behind,
         });
     }
 
@@ -199,32 +200,28 @@ fn infer_default_base(root: &Path, branches: &[RawBranch]) -> Result<Option<Stri
     Ok(None)
 }
 
-fn ahead_behind(root: &Path, branch: &str, upstream: &str) -> Result<(usize, usize)> {
-    let output = git(
-        root,
-        [
-            "rev-list",
-            "--left-right",
-            "--count",
-            &format!("{branch}...{upstream}"),
-        ],
-    )?;
-    let mut parts = output.split_whitespace();
-    let ahead = parts.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
-    let behind = parts.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
-    Ok((ahead, behind))
+fn parse_upstream_track(track: &str) -> (usize, usize) {
+    let trimmed = track.trim().trim_start_matches('[').trim_end_matches(']');
+    if trimmed.is_empty() || trimmed == "gone" {
+        return (0, 0);
+    }
+
+    let mut ahead = 0;
+    let mut behind = 0;
+    for segment in trimmed.split(',') {
+        let segment = segment.trim();
+        if let Some(value) = segment.strip_prefix("ahead ") {
+            ahead = value.parse::<usize>().unwrap_or(0);
+        } else if let Some(value) = segment.strip_prefix("behind ") {
+            behind = value.parse::<usize>().unwrap_or(0);
+        }
+    }
+
+    (ahead, behind)
 }
 
 fn commit_count_above(root: &Path, branch: &str, base_ref: &str) -> Result<usize> {
-    let merge_base = git(root, ["merge-base", branch, base_ref])?;
-    let merge_base = merge_base.trim();
-    if merge_base.is_empty() {
-        return Ok(0);
-    }
-    let count = git(
-        root,
-        ["rev-list", "--count", &format!("{merge_base}..{branch}")],
-    )?;
+    let count = git(root, ["rev-list", "--count", branch, "--not", base_ref])?;
     Ok(count.trim().parse::<usize>().unwrap_or(0))
 }
 
@@ -365,6 +362,23 @@ mod tests {
     #[test]
     fn parse_numstat_empty() {
         assert!(parse_numstat("").is_empty());
+    }
+
+    #[test]
+    fn parse_upstream_track_ahead_and_behind() {
+        assert_eq!(parse_upstream_track("[ahead 3, behind 2]"), (3, 2));
+    }
+
+    #[test]
+    fn parse_upstream_track_single_direction() {
+        assert_eq!(parse_upstream_track("[ahead 4]"), (4, 0));
+        assert_eq!(parse_upstream_track("[behind 5]"), (0, 5));
+    }
+
+    #[test]
+    fn parse_upstream_track_empty_or_gone() {
+        assert_eq!(parse_upstream_track(""), (0, 0));
+        assert_eq!(parse_upstream_track("[gone]"), (0, 0));
     }
 
     #[test]
