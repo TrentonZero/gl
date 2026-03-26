@@ -20,7 +20,11 @@ pub fn log(label: impl AsRef<str>) {
     }
 
     let elapsed = START.get_or_init(Instant::now).elapsed();
-    eprintln!("[gl-profile +{:>6}ms] {}", elapsed.as_millis(), label.as_ref());
+    eprintln!(
+        "[gl-profile +{:>6}ms] {}",
+        elapsed.as_millis(),
+        label.as_ref()
+    );
 }
 
 pub struct ScopeTimer {

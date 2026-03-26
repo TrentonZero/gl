@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Context, Result};
 use crate::perf;
+use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
     env,
@@ -246,8 +246,9 @@ fn parse_upstream_track(track: &str) -> (usize, usize) {
 }
 
 fn commit_count_above(root: &Path, branch: &str, base_ref: &str) -> Result<usize> {
-    let _timer =
-        perf::ScopeTimer::new(format!("commit_count_above branch={branch} base={base_ref}"));
+    let _timer = perf::ScopeTimer::new(format!(
+        "commit_count_above branch={branch} base={base_ref}"
+    ));
     let count = git(root, ["rev-list", "--count", branch, "--not", base_ref])?;
     Ok(count.trim().parse::<usize>().unwrap_or(0))
 }

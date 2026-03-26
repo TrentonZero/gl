@@ -12,9 +12,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use git::{load_branch_diff, load_commit_counts, open_repo, refresh_repo, BranchDiff, BranchInfo, RepoState};
+use git::{
+    load_branch_diff, load_commit_counts, open_repo, refresh_repo, BranchDiff, BranchInfo,
+    RepoState,
+};
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
-use stack::{detect_stacks, enrich_stacks, StackInfo};
+use stack::{detect_stacks, detect_stacks_cached, enrich_stacks, StackInfo};
 use std::{
     env, io, mem,
     path::PathBuf,
@@ -24,6 +27,9 @@ use std::{
 };
 use syntax::SyntaxHighlighter;
 use ui::{draw, BranchEntry, FocusedPane};
+
+#[cfg(test)]
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn main() -> Result<()> {
     let _main_timer = perf::ScopeTimer::new("main");
@@ -37,8 +43,8 @@ fn main() -> Result<()> {
         open_repo(repo_arg)?
     };
     let stack_info = {
-        let _timer = perf::ScopeTimer::new("detect_stacks");
-        detect_stacks(&repo.root, &repo, true)
+        let _timer = perf::ScopeTimer::new("detect_stacks_cached");
+        detect_stacks_cached(&repo.root, &repo)
     };
     let mut app = {
         let _timer = perf::ScopeTimer::new("App::new");
@@ -396,7 +402,8 @@ impl App {
             _ => return Ok(()),
         };
 
-        let Some(branch) = branch_for_diff(&self.repo, &self.stack_info, entry.branch_name()) else {
+        let Some(branch) = branch_for_diff(&self.repo, &self.stack_info, entry.branch_name())
+        else {
             return Ok(());
         };
 
@@ -462,10 +469,12 @@ impl App {
         self.stack_request_id += 1;
         let request_id = self.stack_request_id;
         let root = self.repo.root.clone();
-        let stack_info = self.stack_info.clone();
+        let repo = self.repo.clone();
         let tx = self.stack_result_tx.clone();
         thread::spawn(move || {
-            let _timer = perf::ScopeTimer::new(format!("reload_stack_info_async request={request_id}"));
+            let _timer =
+                perf::ScopeTimer::new(format!("reload_stack_info_async request={request_id}"));
+            let stack_info = detect_stacks(&root, &repo, true);
             let stack_info = enrich_stacks(&root, &stack_info);
             let _ = tx.send(StackLoadResult {
                 request_id,
@@ -515,7 +524,12 @@ impl App {
 
             let selected_branch = self.selected_branch_name().map(ToOwned::to_owned);
             for (name, commit_count) in result.commit_counts {
-                if let Some(branch) = self.repo.branches.iter_mut().find(|branch| branch.name == name) {
+                if let Some(branch) = self
+                    .repo
+                    .branches
+                    .iter_mut()
+                    .find(|branch| branch.name == name)
+                {
                     branch.commit_count = commit_count;
                     changed = true;
                 }
@@ -738,7 +752,11 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
     entries
 }
 
-fn branch_for_diff(repo: &RepoState, stack_info: &StackInfo, branch_name: &str) -> Option<BranchInfo> {
+fn branch_for_diff(
+    repo: &RepoState,
+    stack_info: &StackInfo,
+    branch_name: &str,
+) -> Option<BranchInfo> {
     let mut branch = repo
         .branches
         .iter()
@@ -754,9 +772,11 @@ fn branch_for_diff(repo: &RepoState, stack_info: &StackInfo, branch_name: &str) 
 mod tests {
     use super::*;
     use crate::git::BranchInfo;
-    use crate::stack::{Stack, StackInfo};
+    use crate::stack::{write_stack_cache_for_test, Stack, StackInfo};
     use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_branch(name: &str) -> BranchInfo {
         BranchInfo {
@@ -776,6 +796,21 @@ mod tests {
             root: PathBuf::from("/tmp/fake"),
             branches: branch_names.iter().map(|n| make_branch(n)).collect(),
         }
+    }
+
+    fn make_repo_at(root: PathBuf, branch_names: &[&str]) -> RepoState {
+        RepoState {
+            root,
+            branches: branch_names.iter().map(|n| make_branch(n)).collect(),
+        }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gl-{label}-{}-{nanos}", std::process::id()))
     }
 
     fn empty_stacks() -> StackInfo {
@@ -894,6 +929,80 @@ mod tests {
         assert_eq!(branch.base_ref.as_deref(), Some("stack-base"));
     }
 
+    #[test]
+    fn app_startup_displays_multiple_stacks_from_stale_cache_preview() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let cache_home = unique_temp_dir("startup-cache");
+        std::env::set_var("XDG_CACHE_HOME", &cache_home);
+
+        let repo_root = unique_temp_dir("startup-repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        let cached_repo = make_repo_at(
+            repo_root.clone(),
+            &["alpha-top", "alpha-base", "beta-top", "beta-base", "main"],
+        );
+        let cached_stacks = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "alpha stack".into(),
+                    branches: vec!["alpha-base".into(), "alpha-top".into()],
+                },
+                Stack {
+                    name: "beta stack".into(),
+                    branches: vec!["beta-base".into(), "beta-top".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::from([
+                ("alpha-top".into(), "alpha-base".into()),
+                ("alpha-base".into(), "main".into()),
+                ("beta-top".into(), "beta-base".into()),
+                ("beta-base".into(), "main".into()),
+            ]),
+            stale_branches: std::collections::HashSet::new(),
+        };
+        write_stack_cache_for_test(&repo_root, &cached_repo, &cached_stacks);
+
+        let mut runtime_repo = make_repo_at(
+            repo_root.clone(),
+            &["alpha-top", "alpha-base", "beta-top", "beta-base", "main"],
+        );
+        for branch in &mut runtime_repo.branches {
+            branch.object_id.push_str("-new");
+        }
+        runtime_repo.branches[0].is_head = true;
+
+        let startup_stack_info = detect_stacks_cached(&repo_root, &runtime_repo);
+        let app = App::new(AppConfig::default(), runtime_repo, startup_stack_info);
+        let labels_and_branches: Vec<_> = app
+            .display_entries
+            .iter()
+            .map(|entry| match entry {
+                BranchEntry::Header { label } => format!("header:{label}"),
+                BranchEntry::Branch { branch_name, .. } => format!("branch:{branch_name}"),
+            })
+            .collect();
+
+        assert_eq!(
+            labels_and_branches,
+            vec![
+                "header:alpha stack",
+                "branch:alpha-base",
+                "branch:alpha-top",
+                "header:beta stack",
+                "branch:beta-base",
+                "branch:beta-top",
+                "header:standalone",
+                "branch:main",
+            ]
+        );
+
+        std::env::remove_var("XDG_CACHE_HOME");
+    }
+
     // --- selection navigation helpers ---
 
     fn make_test_entries() -> Vec<BranchEntry> {
@@ -950,90 +1059,101 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn move_selection_skips_headers() {
-        let entries = make_test_entries();
-        let selectable: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !e.is_header())
-            .map(|(i, _)| i)
-            .collect();
-
-        // Selectable indices should be 1, 2, 4, 6
-        assert_eq!(selectable, vec![1, 2, 4, 6]);
+    fn make_test_app(entries: Vec<BranchEntry>) -> App {
+        let (stack_result_tx, stack_result_rx) = mpsc::channel();
+        let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
+        App {
+            config: AppConfig::default(),
+            repo: make_repo(&["a1", "a2", "b1", "main"]),
+            stack_info: empty_stacks(),
+            display_entries: entries,
+            selected_index: 0,
+            branch_diff: None,
+            highlighted_diff: None,
+            diff_scroll: 0,
+            show_help: false,
+            focus: FocusedPane::BranchList,
+            search_mode: false,
+            search_input: String::new(),
+            search_matches: Vec::new(),
+            search_cursor: 0,
+            syntax_highlighter: None,
+            stack_result_tx,
+            stack_result_rx,
+            stack_request_id: 0,
+            commit_count_result_tx,
+            commit_count_result_rx,
+            commit_count_request_id: 0,
+        }
     }
 
     #[test]
-    fn move_selection_clamps_at_start() {
-        let entries = make_test_entries();
-        let selectable: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !e.is_header())
-            .map(|(i, _)| i)
-            .collect();
+    fn move_selection_skips_headers_in_branch_list() {
+        let mut app = make_test_app(make_test_entries());
+        app.jump_to_first_branch();
 
-        // Moving up from first selectable should stay at first
-        let current_pos = 0;
-        let next_pos = (current_pos as isize - 1).clamp(0, (selectable.len() - 1) as isize);
-        assert_eq!(selectable[next_pos as usize], 1);
+        app.move_selection(1);
+        assert_eq!(app.selected_index, 2);
+
+        app.move_selection(1);
+        assert_eq!(app.selected_index, 4);
+
+        app.move_selection(1);
+        assert_eq!(app.selected_index, 6);
     }
 
     #[test]
-    fn move_selection_clamps_at_end() {
-        let entries = make_test_entries();
-        let selectable: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !e.is_header())
-            .map(|(i, _)| i)
-            .collect();
+    fn move_selection_clamps_at_start_of_branch_list() {
+        let mut app = make_test_app(make_test_entries());
 
-        let current_pos = selectable.len() - 1;
-        let next_pos =
-            (current_pos as isize + 1).clamp(0, (selectable.len() - 1) as isize) as usize;
-        assert_eq!(selectable[next_pos], 6);
+        app.jump_to_first_branch();
+        app.move_selection(-1);
+
+        assert_eq!(app.selected_index, 1);
     }
 
     #[test]
-    fn jump_stack_group_finds_first_entry_after_header() {
-        let entries = make_test_entries();
-        let headers: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is_header())
-            .map(|(i, _)| i)
-            .collect();
+    fn move_selection_clamps_at_end_of_branch_list() {
+        let mut app = make_test_app(make_test_entries());
 
-        assert_eq!(headers, vec![0, 3, 5]);
+        app.jump_to_last_branch();
+        app.move_selection(1);
 
-        let group_starts: Vec<usize> = headers
-            .iter()
-            .filter_map(|&h| {
-                entries
-                    .iter()
-                    .enumerate()
-                    .skip(h + 1)
-                    .find(|(_, e)| !e.is_header())
-                    .map(|(i, _)| i)
-            })
-            .collect();
-
-        assert_eq!(group_starts, vec![1, 4, 6]);
+        assert_eq!(app.selected_index, 6);
     }
 
     #[test]
-    fn first_selectable_entry() {
-        let entries = make_test_entries();
-        let first = entries.iter().position(|e| !e.is_header());
-        assert_eq!(first, Some(1));
+    fn jump_stack_group_moves_to_next_group_start() {
+        let mut app = make_test_app(make_test_entries());
+
+        app.jump_to_first_branch();
+        app.jump_stack_group(1);
+        assert_eq!(app.selected_index, 4);
+
+        app.jump_stack_group(1);
+        assert_eq!(app.selected_index, 6);
+
+        app.jump_stack_group(-1);
+        assert_eq!(app.selected_index, 4);
     }
 
     #[test]
-    fn last_selectable_entry() {
-        let entries = make_test_entries();
-        let last = entries.iter().rposition(|e| !e.is_header());
-        assert_eq!(last, Some(6));
+    fn jump_to_first_branch_selects_first_branch_entry() {
+        let mut app = make_test_app(make_test_entries());
+        app.selected_index = 4;
+
+        app.jump_to_first_branch();
+
+        assert_eq!(app.selected_index, 1);
+    }
+
+    #[test]
+    fn jump_to_last_branch_selects_last_branch_entry() {
+        let mut app = make_test_app(make_test_entries());
+        app.selected_index = 1;
+
+        app.jump_to_last_branch();
+
+        assert_eq!(app.selected_index, 6);
     }
 }
