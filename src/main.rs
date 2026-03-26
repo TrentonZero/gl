@@ -17,7 +17,7 @@ use git::{
     RepoState,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
-use stack::{detect_stacks, detect_stacks_cached, enrich_stacks, StackInfo};
+use stack::{detect_stacks, enrich_stacks, StackInfo};
 use std::{
     env, io, mem,
     path::PathBuf,
@@ -42,10 +42,7 @@ fn main() -> Result<()> {
         let _timer = perf::ScopeTimer::new("open_repo");
         open_repo(repo_arg)?
     };
-    let stack_info = {
-        let _timer = perf::ScopeTimer::new("detect_stacks_cached");
-        detect_stacks_cached(&repo.root, &repo)
-    };
+    let stack_info = load_initial_stack_info(&repo);
     let mut app = {
         let _timer = perf::ScopeTimer::new("App::new");
         App::new(config, repo, stack_info)
@@ -115,7 +112,7 @@ impl App {
             commit_count_result_rx,
             commit_count_request_id: 0,
         };
-        app.reload_stack_info_async();
+        app.reload_stack_decorations_async();
         app.reload_commit_counts_async();
         app
     }
@@ -432,7 +429,7 @@ impl App {
         self.repo = refresh_repo(&self.repo.root)?;
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
         self.rebuild_display_entries_preserve_selection(None);
-        self.reload_stack_info_async();
+        self.reload_stack_decorations_async();
         self.reload_commit_counts_async();
 
         // Clamp selected_index to a valid selectable entry
@@ -465,16 +462,16 @@ impl App {
         Ok(())
     }
 
-    fn reload_stack_info_async(&mut self) {
+    fn reload_stack_decorations_async(&mut self) {
         self.stack_request_id += 1;
         let request_id = self.stack_request_id;
         let root = self.repo.root.clone();
-        let repo = self.repo.clone();
+        let stack_info = self.stack_info.clone();
         let tx = self.stack_result_tx.clone();
         thread::spawn(move || {
-            let _timer =
-                perf::ScopeTimer::new(format!("reload_stack_info_async request={request_id}"));
-            let stack_info = detect_stacks(&root, &repo, true);
+            let _timer = perf::ScopeTimer::new(format!(
+                "reload_stack_decorations_async request={request_id}"
+            ));
             let stack_info = enrich_stacks(&root, &stack_info);
             let _ = tx.send(StackLoadResult {
                 request_id,
@@ -676,6 +673,11 @@ impl App {
     }
 }
 
+fn load_initial_stack_info(repo: &RepoState) -> StackInfo {
+    let _timer = perf::ScopeTimer::new("load_initial_stack_info");
+    detect_stacks(&repo.root, repo, true)
+}
+
 fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<BranchEntry> {
     let mut entries = Vec::new();
     let mut used_branches = std::collections::HashSet::new();
@@ -772,9 +774,10 @@ fn branch_for_diff(
 mod tests {
     use super::*;
     use crate::git::BranchInfo;
-    use crate::stack::{write_stack_cache_for_test, Stack, StackInfo};
+    use crate::stack::{Stack, StackInfo};
     use std::collections::HashMap;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -930,41 +933,77 @@ mod tests {
     }
 
     #[test]
-    fn app_startup_displays_multiple_stacks_from_stale_cache_preview() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let cache_home = unique_temp_dir("startup-cache");
-        std::env::set_var("XDG_CACHE_HOME", &cache_home);
-
-        let repo_root = unique_temp_dir("startup-repo");
-        fs::create_dir_all(&repo_root).unwrap();
-
-        let cached_repo = make_repo_at(
-            repo_root.clone(),
-            &["alpha-top", "alpha-base", "beta-top", "beta-base", "main"],
-        );
-        let cached_stacks = StackInfo {
-            stacks: vec![
-                Stack {
-                    name: "alpha stack".into(),
-                    branches: vec!["alpha-base".into(), "alpha-top".into()],
-                },
-                Stack {
-                    name: "beta stack".into(),
-                    branches: vec!["beta-base".into(), "beta-top".into()],
-                },
-            ],
+    fn app_applies_lazy_stack_decorations_without_reordering_entries() {
+        let repo = make_repo(&["alpha-top", "alpha-base", "main"]);
+        let stack_info = StackInfo {
+            stacks: vec![Stack {
+                name: "alpha stack".into(),
+                branches: vec!["alpha-base".into(), "alpha-top".into()],
+            }],
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::from([
                 ("alpha-top".into(), "alpha-base".into()),
                 ("alpha-base".into(), "main".into()),
-                ("beta-top".into(), "beta-base".into()),
-                ("beta-base".into(), "main".into()),
             ]),
             stale_branches: std::collections::HashSet::new(),
         };
-        write_stack_cache_for_test(&repo_root, &cached_repo, &cached_stacks);
+
+        let mut app = App::new(AppConfig::default(), repo, stack_info.clone());
+        let before: Vec<_> = app
+            .display_entries
+            .iter()
+            .map(|entry| entry.branch_name().to_string())
+            .collect();
+
+        app.stack_request_id += 1;
+        let request_id = app.stack_request_id;
+        let mut decorated = stack_info;
+        decorated
+            .stale_branches
+            .insert("alpha-top".to_string());
+        app.stack_result_tx
+            .send(StackLoadResult {
+                request_id,
+                stack_info: decorated,
+            })
+            .unwrap();
+
+        assert!(app.apply_pending_stack_updates());
+
+        let after: Vec<_> = app
+            .display_entries
+            .iter()
+            .map(|entry| entry.branch_name().to_string())
+            .collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn initial_stack_info_builds_first_paint_shape_from_gt_output() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let repo_root = unique_temp_dir("startup-repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        let fake_bin = unique_temp_dir("fake-gt-bin");
+        fs::create_dir_all(&fake_bin).unwrap();
+        let fake_gt = fake_bin.join("gt");
+        fs::write(
+            &fake_gt,
+            "#!/bin/sh\nif [ \"$1\" = \"log\" ] && [ \"$2\" = \"short\" ] && [ \"$3\" = \"--no-interactive\" ]; then\ncat <<'EOF'\n◉    alpha-top\n◯    alpha-base\n│ ◯  beta-top\n│ ◯  beta-base\n◯─┘  main\nEOF\nelse\nexit 1\nfi\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_gt).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_gt, permissions).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let mut path_entries = vec![fake_bin.clone()];
+        path_entries.extend(std::env::split_paths(
+            &original_path.clone().unwrap_or_default(),
+        ));
+        let joined_path = std::env::join_paths(path_entries).unwrap();
+        std::env::set_var("PATH", &joined_path);
 
         let mut runtime_repo = make_repo_at(
             repo_root.clone(),
@@ -975,7 +1014,7 @@ mod tests {
         }
         runtime_repo.branches[0].is_head = true;
 
-        let startup_stack_info = detect_stacks_cached(&repo_root, &runtime_repo);
+        let startup_stack_info = load_initial_stack_info(&runtime_repo);
         let app = App::new(AppConfig::default(), runtime_repo, startup_stack_info);
         let labels_and_branches: Vec<_> = app
             .display_entries
@@ -989,10 +1028,10 @@ mod tests {
         assert_eq!(
             labels_and_branches,
             vec![
-                "header:alpha stack",
+                "header:alpha-base stack",
                 "branch:alpha-base",
                 "branch:alpha-top",
-                "header:beta stack",
+                "header:beta-base stack",
                 "branch:beta-base",
                 "branch:beta-top",
                 "header:standalone",
@@ -1000,7 +1039,11 @@ mod tests {
             ]
         );
 
-        std::env::remove_var("XDG_CACHE_HOME");
+        if let Some(original_path) = original_path {
+            std::env::set_var("PATH", original_path);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 
     // --- selection navigation helpers ---
