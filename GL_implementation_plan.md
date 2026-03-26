@@ -72,7 +72,15 @@ Delivered:
 
 ### Phase 5: Stack View
 
-**Status:** Not started
+**Status:** Complete
+
+Delivered:
+
+- dedicated stack view opened from the branch list for stacked branches
+- stack relationship summary for the selected branch, including parent, child, diff base, and stale state
+- per-branch stack roster with current-branch, head, stale, and tracking indicators
+- `s` to toggle the stack view and `Esc` to close it
+- behavior tests covering stack-view availability and stack-aware rendering
 
 ### Phase 6: Worktree Support
 
@@ -142,7 +150,7 @@ Missing:
 The best next feature is probably one of:
 
 - `Status View`, because it extends the current diff renderer
-- `Stack View`, because the app already has stack data and stale detection
+- `Commit Breakdown`, because stack inspection is now covered and commit-level drill-down would deepen review workflows
 
 Worktree support should wait until one of those ships, otherwise the app becomes broader without getting much deeper.
 

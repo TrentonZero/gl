@@ -1,8 +1,37 @@
 # gl
 
-A terminal UI for browsing git diffs by branch.
+`gl` is a terminal UI for browsing local git branches as branch-level diffs.
 
-update
+Today the app is focused on one core workflow:
+
+- show local branches
+- group Graphite stacks when `gt` is available
+- open a branch as a combined diff against its base
+- navigate the diff quickly in the terminal
+
+## Current Features
+
+- Local branch list with:
+  - current branch indicator
+  - ahead/behind tracking status
+  - async commit-count enrichment
+  - Graphite stack grouping and stale-branch markers when `gt` is available
+- Branch detail view with:
+  - combined branch diff against upstream, detected trunk, or Graphite parent
+  - syntax-highlighted diff rendering via `syntect`
+  - file-header jump navigation
+  - in-diff search with `n` and `N`
+- Stack view with:
+  - selected-branch parent/child/base summary
+  - ordered stack branch roster with stale and tracking indicators
+- Manual refresh with `R`
+- Optional top and bottom chrome via `~/.config/gl/config.toml`
+- Lightweight profiling logs when `GL_PROFILE=1`
+
+## What Is Not Implemented Yet
+
+The repository still contains broader design docs for worktrees, status view, graph view, side-by-side diff, command mode, and richer config. Those are not implemented in the current binary.
+
 ## Prerequisites
 
 - [Rust toolchain](https://rustup.rs/) (1.70+)
@@ -39,3 +68,51 @@ gl
 # Run against a specific repo
 gl /path/to/repo
 ```
+
+## Keybindings
+
+Branch list:
+
+- `j` / `k`: move selection
+- `J` / `K`: jump between stack groups
+- `gg` / `G`: jump to first or last branch
+- `Ctrl-d` / `Ctrl-u`: move faster through the list
+- `Enter`: open selected branch diff
+- `s`: open or close the selected branch's stack view
+- `R`: refresh repository data
+- `?`: show help
+- `q`: quit
+
+Branch detail:
+
+- `Tab`: switch focus between branch list and diff pane
+- `Esc`: close the detail view
+
+Diff pane:
+
+- `j` / `k`: scroll
+- `J` / `K`: jump between file headers
+- `gg` / `G`: top or bottom
+- `Ctrl-d` / `Ctrl-u`: half-page scroll
+- `/`: start search
+- `n` / `N`: next or previous match
+
+## Config
+
+Config path:
+
+```sh
+~/.config/gl/config.toml
+```
+
+Current supported option:
+
+```toml
+chrome = true
+```
+
+Set `chrome = false` to hide the top status bar and bottom help bar.
+
+## Profiling
+
+Set `GL_PROFILE=1` to emit simple timing logs to stderr for startup, refresh, stack detection, diff loading, and syntax highlighting.

@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
-use ui::{draw, BranchEntry, FocusedPane};
+use ui::{draw, BranchEntry, FocusedPane, StackView, StackViewBranch};
 
 #[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -66,6 +66,7 @@ struct App {
     stack_info: StackInfo,
     display_entries: Vec<BranchEntry>,
     selected_index: usize,
+    show_stack_view: bool,
     branch_diff: Option<BranchDiff>,
     highlighted_diff: Option<Vec<Line<'static>>>,
     diff_scroll: usize,
@@ -95,6 +96,7 @@ impl App {
             stack_info,
             display_entries,
             selected_index: 0,
+            show_stack_view: false,
             branch_diff: None,
             highlighted_diff: None,
             diff_scroll: 0,
@@ -156,6 +158,7 @@ impl App {
                         &self.repo,
                         &self.display_entries,
                         self.selected_index,
+                        self.current_stack_view().as_ref(),
                         self.branch_diff.as_ref(),
                         self.highlighted_diff.as_deref(),
                         self.diff_scroll,
@@ -244,6 +247,8 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-10)
             }
+            KeyCode::Char('s') => self.toggle_stack_view(),
+            KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
             KeyCode::Enter => self.open_selected_branch()?,
             _ => {}
         }
@@ -408,6 +413,7 @@ impl App {
         let diff = load_branch_diff(&self.repo.root, &branch)?;
         self.highlighted_diff = Some(self.syntax_highlighter().highlight_diff(&diff)?);
         self.branch_diff = Some(diff);
+        self.show_stack_view = false;
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
         self.search_matches.clear();
@@ -430,6 +436,9 @@ impl App {
         self.repo = refresh_repo(&self.repo.root)?;
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
         self.rebuild_display_entries_preserve_selection(None);
+        if self.show_stack_view && self.current_stack_view().is_none() {
+            self.show_stack_view = false;
+        }
         self.reload_stack_decorations_async();
         self.reload_commit_counts_async();
 
@@ -543,6 +552,27 @@ impl App {
     fn syntax_highlighter(&mut self) -> &mut SyntaxHighlighter {
         self.syntax_highlighter
             .get_or_insert_with(SyntaxHighlighter::new)
+    }
+
+    fn toggle_stack_view(&mut self) {
+        if self.show_stack_view {
+            self.show_stack_view = false;
+            return;
+        }
+        self.show_stack_view = self.stack_view_for_selected_branch().is_some();
+    }
+
+    fn current_stack_view(&self) -> Option<StackView> {
+        if !self.show_stack_view {
+            return None;
+        }
+
+        self.stack_view_for_selected_branch()
+    }
+
+    fn stack_view_for_selected_branch(&self) -> Option<StackView> {
+        let selected_branch = self.selected_branch_name()?;
+        build_stack_view(&self.repo, &self.stack_info, selected_branch)
     }
 
     fn rebuild_display_entries_preserve_selection(&mut self, branch_name: Option<&str>) {
@@ -689,6 +719,51 @@ fn stack_notice(stack_info: &StackInfo) -> Option<&'static str> {
             Some("Graphite stack parse failed; showing inferred local branch relationships.")
         }
     }
+}
+
+fn build_stack_view(
+    repo: &RepoState,
+    stack_info: &StackInfo,
+    branch_name: &str,
+) -> Option<StackView> {
+    let stack = stack_info.stack_for_branch(branch_name)?;
+    let branch_map: std::collections::HashMap<_, _> = repo
+        .branches
+        .iter()
+        .map(|branch| (branch.name.clone(), branch))
+        .collect();
+    let selected_index = stack.branches.iter().position(|name| name == branch_name)?;
+    let diff_branch = branch_for_diff(repo, stack_info, branch_name)?;
+    let parent_branch = (selected_index > 0).then(|| stack.branches[selected_index - 1].clone());
+    let child_branch = stack.branches.get(selected_index + 1).cloned();
+
+    let branches = stack
+        .branches
+        .iter()
+        .filter_map(|name| {
+            let branch = branch_map.get(name.as_str())?;
+            Some(StackViewBranch {
+                name: name.clone(),
+                is_selected: name == branch_name,
+                is_head: branch.is_head,
+                commit_count: branch.commit_count,
+                ahead: branch.ahead,
+                behind: branch.behind,
+                has_upstream: branch.upstream.is_some(),
+                stale: stack_info.is_stale(name),
+            })
+        })
+        .collect();
+
+    Some(StackView {
+        title: stack.name.clone(),
+        selected_branch: branch_name.to_string(),
+        parent_branch,
+        child_branch,
+        base_ref: diff_branch.base_ref,
+        stale: stack_info.is_stale(branch_name),
+        branches,
+    })
 }
 
 fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<BranchEntry> {
@@ -1128,6 +1203,7 @@ mod tests {
             stack_info: empty_stacks(),
             display_entries: entries,
             selected_index: 0,
+            show_stack_view: false,
             branch_diff: None,
             highlighted_diff: None,
             diff_scroll: 0,
@@ -1215,5 +1291,107 @@ mod tests {
         app.jump_to_last_branch();
 
         assert_eq!(app.selected_index, 6);
+    }
+
+    #[test]
+    fn build_stack_view_includes_parent_child_and_branch_status() {
+        let mut repo = make_repo(&["auth-base", "auth-ui", "main"]);
+        repo.branches[1].is_head = true;
+        repo.branches[1].ahead = 2;
+        repo.branches[1].upstream = Some("origin/auth-ui".into());
+        let stacks = StackInfo {
+            stacks: vec![Stack {
+                name: "auth stack".into(),
+                branches: vec!["auth-base".into(), "auth-ui".into()],
+            }],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::from([
+                ("auth-base".into(), "main".into()),
+                ("auth-ui".into(), "auth-base".into()),
+            ]),
+            stale_branches: std::collections::HashSet::from(["auth-ui".into()]),
+            detection_status: StackDetectionStatus::Ready,
+        };
+
+        let view = build_stack_view(&repo, &stacks, "auth-ui").unwrap();
+        assert_eq!(view.title, "auth stack");
+        assert_eq!(view.parent_branch.as_deref(), Some("auth-base"));
+        assert_eq!(view.child_branch, None);
+        assert_eq!(view.base_ref.as_deref(), Some("auth-base"));
+        assert!(view.stale);
+        assert_eq!(view.branches.len(), 2);
+        assert!(view.branches[1].is_selected);
+        assert!(view.branches[1].is_head);
+        assert_eq!(view.branches[1].ahead, 2);
+    }
+
+    #[test]
+    fn toggle_stack_view_only_opens_for_branches_in_a_stack() {
+        let repo = make_repo(&["auth-base", "auth-ui", "main"]);
+        let stack_info = StackInfo {
+            stacks: vec![Stack {
+                name: "auth stack".into(),
+                branches: vec!["auth-base".into(), "auth-ui".into()],
+            }],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::from([
+                ("auth-base".into(), "main".into()),
+                ("auth-ui".into(), "auth-base".into()),
+            ]),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new(AppConfig::default(), repo, stack_info);
+        app.jump_to_first_branch();
+
+        app.toggle_stack_view();
+        assert!(app.show_stack_view);
+        assert_eq!(
+            app.current_stack_view()
+                .as_ref()
+                .map(|view| view.selected_branch.as_str()),
+            Some("auth-base")
+        );
+
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "main")
+            .unwrap();
+        app.show_stack_view = false;
+        app.toggle_stack_view();
+        assert!(!app.show_stack_view);
+    }
+
+    #[test]
+    fn refresh_closes_stack_view_when_selected_branch_is_no_longer_stacked() {
+        let mut app = make_test_app(make_test_entries());
+        app.stack_info = StackInfo {
+            stacks: vec![Stack {
+                name: "stack A".into(),
+                branches: vec!["a1".into(), "a2".into()],
+            }],
+            standalone: vec!["b1".into(), "main".into()],
+            branch_to_parent: HashMap::from([
+                ("a1".into(), "main".into()),
+                ("a2".into(), "a1".into()),
+            ]),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        app.display_entries = build_display_entries(&app.repo, &app.stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a2")
+            .unwrap();
+        app.show_stack_view = true;
+
+        app.stack_info = empty_stacks();
+        if app.show_stack_view && app.current_stack_view().is_none() {
+            app.show_stack_view = false;
+        }
+
+        assert!(!app.show_stack_view);
     }
 }

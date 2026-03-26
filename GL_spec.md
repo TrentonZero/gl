@@ -35,6 +35,13 @@ The commit graph view (when visible) uses first-parent-only traversal by default
 
 This applies everywhere: the branch diff computation, the log view, and any graph visualization.
 
+Current implementation notes:
+
+- If the Graphite CLI (`gt`) is available and `gt log short --no-interactive` succeeds, GL parses the output into stack groups.
+- Stack structure is cached on disk.
+- Stale branches are computed asynchronously by comparing each branch-parent merge-base to the parent tip.
+- If Graphite data is unavailable, GL shows a non-blocking notice and falls back to inferred local stack relationships when possible.
+
 ### Local Only
 
 GL shows only branches that exist locally. There is no "remote branches" browser, no listing of branches that exist only on the remote. If it's not checked out or fetched into a local ref, it doesn't exist in GL's world.
@@ -158,6 +165,21 @@ An optional, togglable commit graph view. This is not the primary interface but 
 - Merge commits rendered as single nodes
 - Toggle to expand merged branches when needed
 - No remote-only branches appear
+
+### 4. Stack View
+
+Pressing `s` on a stacked branch opens a two-pane layout:
+
+- left pane: branch list
+- right pane: selected branch's stack summary
+
+The stack pane shows:
+
+- selected branch
+- parent and child within the stack
+- diff base used for branch comparison
+- stale state
+- ordered stack branches with current-branch, stale, and tracking indicators
 
 ---
 
@@ -406,3 +428,17 @@ These were originally open questions, now settled:
 3. **No stack mutation.** GL invokes `gt` only for read-only stack discovery. Restacking, submitting, and branch management happen in the shell.
 4. **Single repository only.** GL is always scoped to one repo. Run multiple instances for multiple repos.
 5. **Vim-style keybindings.** Where a vim key has a natural mapping (j/k, gg/G, Ctrl-d/Ctrl-u, /), GL uses it. No additional complexity for the sake of vim completeness.
+
+Current implementation scope:
+
+- Implemented today: branch list, branch-level diff view, syntax highlighting, Graphite stack grouping, stack view, minimal config, and profiling hooks.
+- Not yet implemented: worktree manager, status view, commit drill-down, graph view, side-by-side diff, whitespace diff toggles, command mode, and mutation workflows such as commit, stage, rebase, push, or worktree creation.
+
+## Planned Extensions
+
+The most natural next additions, based on the current codebase shape, are:
+
+- a status view using the existing diff rendering path
+- richer config and command-line support
+
+Those are roadmap items, not implemented behavior.
