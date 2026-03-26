@@ -145,22 +145,34 @@ Missing:
 - theme/config customization
 - broader edge-case polish
 
-## Near-Term Priorities
+---
 
-### 1. Tighten the branch-diff experience
+## Recommended Next Steps
+
+The current implementation has already delivered the core product loop, so the remaining work should prioritize depth first and breadth later.
+
+Recommended implementation order for the remaining phases:
+
+1. `Phase 7: Status View`
+   Reuses the current diff pipeline and adds the next most natural review surface.
+2. `Phase 8: Commit Breakdown`
+   Extends branch and stack inspection into commit-level drill-down.
+3. `Phase 10: Filesystem Watching and Background Refresh`
+   Becomes more valuable once multiple read surfaces benefit from staying warm.
+4. `Phase 11: Side-by-Side Diff and Diff Options`
+   Improves the core diff experience after the main review views are in place.
+5. `Phase 9: Graph View`
+   Useful, but more specialized than status and commit inspection.
+6. `Phase 12: Command Line, Config, and Polish`
+   Best handled after the product surface is more stable.
+7. `Phase 6: Worktree Support`
+   Still the broadest feature, so it should wait until the viewer workflow is deeper.
+
+Short-term tightening work that can happen alongside the next phase:
 
 - make diff viewport sizing dynamic instead of relying on fixed assumptions
 - improve search UX feedback when there are zero matches
 - add tests around branch base selection and diff behavior in stacked branches
-
-### 2. Add the next real view, not multiple half-views
-
-The best next feature is probably one of:
-
-- `Status View`, because it extends the current diff renderer
-- `Commit Breakdown`, because stack inspection is now covered and commit-level drill-down would deepen review workflows
-
-Worktree support should wait until one of those ships, otherwise the app becomes broader without getting much deeper.
 
 ---
 
