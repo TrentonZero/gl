@@ -6,7 +6,49 @@ This plan breaks the GL build into phases. Each phase produces a working, testab
 
 ---
 
+<<<<<<< HEAD
 ## Current Implementation Status
+=======
+## Current Build Summary
+
+The current binary is a working TUI centered on branch browsing and branch-level diff inspection.
+
+Implemented today:
+
+- open a repo from the current directory or a provided path
+- list local branches
+- infer a default base branch from `origin/HEAD`, `main`, `master`, or `trunk`
+- show ahead/behind tracking status
+- compute branch commit counts asynchronously
+- detect Graphite stacks from `gt log short`
+- cache stack structure on disk
+- enrich stacks asynchronously with stale-branch detection
+- open a combined branch diff against the branch base
+- open a working tree status view for the checked-out branch
+- syntax highlight diff content with `syntect`
+- search within the diff
+- refresh repo state manually with `R`
+- read `chrome = true|false` from `~/.config/gl/config.toml`
+- emit optional profiling logs via `GL_PROFILE`
+
+Not implemented today:
+
+- stack view
+- worktree manager
+- status view
+- commit drill-down
+- graph view
+- filesystem watching
+- side-by-side diff
+- whitespace diff modes
+- command mode
+- expanded config surface
+- `--help` / `--version`
+
+---
+
+## Phase Status
+>>>>>>> 4d92023 (Add checked-out branch status view)
 
 ### Phase 1: Skeleton and Branch List
 
@@ -96,7 +138,15 @@ Subphase 5a: Diff Preload Cache
 
 ### Phase 7: Status View
 
-**Status:** Not started
+**Status:** Complete
+
+Delivered:
+
+- `S` opens a status view for the checked-out branch from the branch list
+- working tree summary counts for staged, unstaged, and untracked changes
+- staged and unstaged diffs rendered in the existing detail pane
+- untracked files included in the jumpable status file list
+- behavior tests covering staged, unstaged, and untracked status loading
 
 ### Phase 8: Commit Breakdown
 
@@ -153,19 +203,17 @@ The current implementation has already delivered the core product loop, so the r
 
 Recommended implementation order for the remaining phases:
 
-1. `Phase 7: Status View`
-   Reuses the current diff pipeline and adds the next most natural review surface.
-2. `Phase 8: Commit Breakdown`
+1. `Phase 8: Commit Breakdown`
    Extends branch and stack inspection into commit-level drill-down.
-3. `Phase 10: Filesystem Watching and Background Refresh`
+2. `Phase 10: Filesystem Watching and Background Refresh`
    Becomes more valuable once multiple read surfaces benefit from staying warm.
-4. `Phase 11: Side-by-Side Diff and Diff Options`
+3. `Phase 11: Side-by-Side Diff and Diff Options`
    Improves the core diff experience after the main review views are in place.
-5. `Phase 9: Graph View`
+4. `Phase 9: Graph View`
    Useful, but more specialized than status and commit inspection.
-6. `Phase 12: Command Line, Config, and Polish`
+5. `Phase 12: Command Line, Config, and Polish`
    Best handled after the product surface is more stable.
-7. `Phase 6: Worktree Support`
+6. `Phase 6: Worktree Support`
    Still the broadest feature, so it should wait until the viewer workflow is deeper.
 
 Short-term tightening work that can happen alongside the next phase:

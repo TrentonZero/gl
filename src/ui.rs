@@ -1,6 +1,6 @@
 use crate::{
     config::AppConfig,
-    git::{BranchDiff, DiffLineKind, RepoState},
+    git::{BranchDiff, DetailKind, DiffLineKind, RepoState},
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -76,6 +76,7 @@ pub fn draw(
     display_entries: &[BranchEntry],
     selected_index: usize,
     stack_view: Option<&StackView>,
+    detail_kind: Option<DetailKind>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
@@ -105,12 +106,12 @@ pub fn draw(
     };
 
     if config.chrome {
-        draw_status_bar(frame, areas[0], repo, branch_diff.is_some());
+        draw_status_bar(frame, areas[0], repo, detail_kind);
         draw_help_bar(
             frame,
             areas[2],
             stack_view.is_some(),
-            branch_diff.is_some(),
+            detail_kind,
             focus,
             search,
             notice,
@@ -123,6 +124,7 @@ pub fn draw(
         display_entries,
         selected_index,
         stack_view,
+        detail_kind,
         branch_diff,
         highlighted_diff,
         diff_scroll,
@@ -134,11 +136,16 @@ pub fn draw(
     }
 }
 
-fn draw_status_bar(frame: &mut Frame<'_>, area: Rect, repo: &RepoState, detail: bool) {
-    let title = if detail {
-        "GL — Green Ledger · Detail"
-    } else {
-        "GL — Green Ledger · Branches"
+fn draw_status_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    repo: &RepoState,
+    detail_kind: Option<DetailKind>,
+) {
+    let title = match detail_kind {
+        Some(DetailKind::BranchDiff) => "GL - Green Ledger · Detail",
+        Some(DetailKind::Status) => "GL - Green Ledger · Status",
+        None => "GL - Green Ledger · Branches",
     };
     let line = Line::from(vec![
         Span::styled(
@@ -165,26 +172,26 @@ fn draw_help_bar(
     frame: &mut Frame<'_>,
     area: Rect,
     stack_view_open: bool,
-    detail: bool,
+    detail_kind: Option<DetailKind>,
     focus: FocusedPane,
     search: Option<&str>,
     notice: Option<&str>,
 ) {
-    let line = help_bar_line(stack_view_open, detail, focus, search, notice);
+    let line = help_bar_line(stack_view_open, detail_kind, focus, search, notice);
     frame.render_widget(Paragraph::new(line), area);
 }
 
 fn help_bar_line(
     stack_view_open: bool,
-    detail: bool,
+    detail_kind: Option<DetailKind>,
     focus: FocusedPane,
     search: Option<&str>,
     notice: Option<&str>,
 ) -> Line<'static> {
-    let hints = if detail {
+    let hints = if detail_kind.is_some() {
         match focus {
             FocusedPane::BranchList => {
-                "j/k move  J/K stacks  Enter open  Esc close  q quit  ? help"
+                "j/k move  J/K stacks  Enter open  S status  Esc close  q quit  ? help"
             }
             FocusedPane::Diff => {
                 "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  / search  n/N next  Esc list"
@@ -193,7 +200,7 @@ fn help_bar_line(
     } else if stack_view_open {
         "j/k move  J/K stacks  Enter open diff  s stack  Esc close  R refresh  q quit"
     } else {
-        "j/k move  J/K stacks  Enter open  s stack  R refresh  q quit  ? help"
+        "j/k move  J/K stacks  Enter open  S status  s stack  R refresh  q quit  ? help"
     };
 
     let mut line = Line::from(Span::styled(hints, Style::default().fg(Color::Gray)));
@@ -222,6 +229,7 @@ fn draw_body(
     display_entries: &[BranchEntry],
     selected_index: usize,
     stack_view: Option<&StackView>,
+    detail_kind: Option<DetailKind>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
@@ -243,6 +251,7 @@ fn draw_body(
             draw_diff(
                 frame,
                 panes[1],
+                detail_kind,
                 diff,
                 highlighted_diff,
                 diff_scroll,
@@ -431,14 +440,18 @@ fn format_branch_name(branch_name: &str, width: usize) -> String {
 fn draw_diff(
     frame: &mut Frame<'_>,
     area: Rect,
+    detail_kind: Option<DetailKind>,
     diff: &BranchDiff,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
     focused: bool,
 ) {
-    let title = match &diff.base_ref {
-        Some(base_ref) => format!("{} vs {}", diff.branch_name, base_ref),
-        None => diff.branch_name.clone(),
+    let title = match detail_kind {
+        Some(DetailKind::Status) => format!("{} working tree", diff.branch_name),
+        _ => match &diff.base_ref {
+            Some(base_ref) => format!("{} vs {}", diff.branch_name, base_ref),
+            None => diff.branch_name.clone(),
+        },
     };
 
     let block = Block::default()
@@ -674,7 +687,7 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             Line::from(""),
             Line::from("Global: q quit, ? toggle help, R refresh"),
             Line::from("Branches: j/k move, J/K jump stacks, gg/G ends, s stack"),
-            Line::from("          Ctrl-d/u half-page, Enter open branch"),
+            Line::from("          Ctrl-d/u half-page, Enter open branch, S status"),
             Line::from("Stack view: Esc back to list, Enter open selected diff"),
             Line::from("Detail: Esc back to list, Tab focus diff/list"),
             Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G"),
@@ -930,7 +943,7 @@ mod tests {
     fn help_bar_shows_non_blocking_notice() {
         let line = help_bar_line(
             false,
-            false,
+            None,
             FocusedPane::BranchList,
             None,
             Some("Graphite unavailable; showing inferred local branch relationships."),
@@ -946,7 +959,7 @@ mod tests {
 
     #[test]
     fn help_bar_shows_stack_view_hints() {
-        let line = help_bar_line(true, false, FocusedPane::BranchList, None, None);
+        let line = help_bar_line(true, None, FocusedPane::BranchList, None, None);
         let text: String = line
             .spans
             .iter()
@@ -954,6 +967,17 @@ mod tests {
             .collect();
         assert!(text.contains("Enter open diff"));
         assert!(text.contains("Esc close"));
+    }
+
+    #[test]
+    fn help_bar_shows_status_shortcut_in_branch_list() {
+        let line = help_bar_line(false, None, FocusedPane::BranchList, None, None);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("S status"));
     }
 
     #[test]

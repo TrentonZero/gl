@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     env,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 #[derive(Debug, Clone)]
@@ -33,6 +33,12 @@ pub struct BranchDiff {
     pub file_positions: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailKind {
+    BranchDiff,
+    Status,
+}
+
 #[derive(Debug, Clone)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
@@ -58,6 +64,13 @@ struct RawBranch {
     upstream: Option<String>,
     ahead: usize,
     behind: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusEntry {
+    staged: char,
+    unstaged: char,
+    path: String,
 }
 
 pub fn open_repo(path: Option<PathBuf>) -> Result<RepoState> {
@@ -162,6 +175,38 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
     ))
 }
 
+pub fn load_working_tree_status(root: &Path, branch_name: &str) -> Result<BranchDiff> {
+    let _timer = perf::ScopeTimer::new(format!("load_working_tree_status branch={branch_name}"));
+    let status_output = git(root, ["status", "--short"])?;
+    let status_entries = parse_status_entries(&status_output);
+    let staged_patch = git(
+        root,
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            "--cached",
+            "HEAD",
+        ],
+    )?;
+    let staged_stats = parse_numstat(&git(root, ["diff", "--cached", "--numstat", "HEAD"])?);
+    let unstaged_patch = git(
+        root,
+        ["diff", "--no-color", "--no-ext-diff", "--find-renames"],
+    )?;
+    let unstaged_stats = parse_numstat(&git(root, ["diff", "--numstat"])?);
+
+    Ok(build_working_tree_diff(
+        branch_name,
+        &status_entries,
+        &staged_patch,
+        &staged_stats,
+        &unstaged_patch,
+        &unstaged_stats,
+    ))
+}
+
 fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
     let _timer = perf::ScopeTimer::new("local_branches");
     let output = git(
@@ -243,6 +288,145 @@ fn parse_upstream_track(track: &str) -> (usize, usize) {
     }
 
     (ahead, behind)
+}
+
+fn parse_status_entries(output: &str) -> Vec<StatusEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 3 {
+                return None;
+            }
+
+            let mut chars = line.chars();
+            let staged = chars.next()?;
+            let unstaged = chars.next()?;
+            let path = line[3..].trim().to_string();
+            if path.is_empty() {
+                return None;
+            }
+
+            Some(StatusEntry {
+                staged,
+                unstaged,
+                path,
+            })
+        })
+        .collect()
+}
+
+fn build_working_tree_diff(
+    branch_name: &str,
+    status_entries: &[StatusEntry],
+    staged_patch: &str,
+    staged_stats: &HashMap<String, (String, String)>,
+    unstaged_patch: &str,
+    unstaged_stats: &HashMap<String, (String, String)>,
+) -> BranchDiff {
+    let mut lines = Vec::new();
+    let mut file_positions = Vec::new();
+
+    let staged_count = status_entries
+        .iter()
+        .filter(|entry| !matches!(entry.staged, ' ' | '?'))
+        .count();
+    let unstaged_count = status_entries
+        .iter()
+        .filter(|entry| !matches!(entry.unstaged, ' ' | '?'))
+        .count();
+    let untracked: Vec<_> = status_entries
+        .iter()
+        .filter(|entry| entry.staged == '?' && entry.unstaged == '?')
+        .collect();
+
+    if status_entries.is_empty() {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Meta,
+            text: "Working tree is clean.".to_string(),
+            file_path: None,
+        });
+        return BranchDiff {
+            branch_name: branch_name.to_string(),
+            base_ref: Some("working tree".to_string()),
+            lines,
+            file_positions,
+        };
+    }
+
+    lines.push(DiffLine {
+        kind: DiffLineKind::Meta,
+        text: format!(
+            "Working tree status: {staged_count} staged, {unstaged_count} unstaged, {} untracked",
+            untracked.len()
+        ),
+        file_path: None,
+    });
+
+    append_status_section(
+        &mut lines,
+        &mut file_positions,
+        "Staged Changes",
+        staged_patch,
+        staged_stats,
+    );
+    append_status_section(
+        &mut lines,
+        &mut file_positions,
+        "Unstaged Changes",
+        unstaged_patch,
+        unstaged_stats,
+    );
+
+    if !untracked.is_empty() {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Meta,
+            text: "Untracked Files".to_string(),
+            file_path: None,
+        });
+        for entry in untracked {
+            file_positions.push(lines.len());
+            lines.push(DiffLine {
+                kind: DiffLineKind::File,
+                text: format!("── {} ── untracked", entry.path),
+                file_path: Some(entry.path.clone()),
+            });
+        }
+    }
+
+    BranchDiff {
+        branch_name: branch_name.to_string(),
+        base_ref: Some("working tree".to_string()),
+        lines,
+        file_positions,
+    }
+}
+
+fn append_status_section(
+    lines: &mut Vec<DiffLine>,
+    file_positions: &mut Vec<usize>,
+    title: &str,
+    patch: &str,
+    stat_map: &HashMap<String, (String, String)>,
+) {
+    if patch.trim().is_empty() {
+        return;
+    }
+
+    lines.push(DiffLine {
+        kind: DiffLineKind::Meta,
+        text: title.to_string(),
+        file_path: None,
+    });
+
+    let section = parse_diff(String::new(), None, patch, stat_map);
+    let offset = lines.len();
+    file_positions.extend(
+        section
+            .file_positions
+            .into_iter()
+            .map(|position| position + offset),
+    );
+    lines.extend(section.lines);
 }
 
 fn commit_count_above(root: &Path, branch: &str, base_ref: &str) -> Result<usize> {
@@ -353,11 +537,7 @@ pub(crate) fn parse_diff(
 fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
     let label = format!("git {}", args.join(" "));
     let _timer = perf::ScopeTimer::new(label);
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .with_context(|| format!("failed to run git {:?}", args))?;
+    let output = run_git_command(root, &args)?;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -370,9 +550,56 @@ fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn run_git_command(root: &Path, args: &[&str]) -> Result<Output> {
+    for binary in ["git", "/usr/bin/git"] {
+        match Command::new(binary).args(args).current_dir(root).output() {
+            Ok(output) => return Ok(output),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to run git {:?}", args));
+            }
+        }
+    }
+
+    Err(anyhow!("failed to find git executable"))
+        .with_context(|| format!("failed to run git {:?}", args))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gl-git-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .or_else(|_| {
+                Command::new("/usr/bin/git")
+                    .args(args)
+                    .current_dir(root)
+                    .output()
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn parse_numstat_basic() {
@@ -409,6 +636,31 @@ mod tests {
     fn parse_upstream_track_empty_or_gone() {
         assert_eq!(parse_upstream_track(""), (0, 0));
         assert_eq!(parse_upstream_track("[gone]"), (0, 0));
+    }
+
+    #[test]
+    fn parse_status_entries_reads_porcelain_short_codes() {
+        let entries = parse_status_entries("M  src/main.rs\n M src/ui.rs\n?? notes.txt\n");
+        assert_eq!(
+            entries,
+            vec![
+                StatusEntry {
+                    staged: 'M',
+                    unstaged: ' ',
+                    path: "src/main.rs".into(),
+                },
+                StatusEntry {
+                    staged: ' ',
+                    unstaged: 'M',
+                    path: "src/ui.rs".into(),
+                },
+                StatusEntry {
+                    staged: '?',
+                    unstaged: '?',
+                    path: "notes.txt".into(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -591,13 +843,52 @@ index 1111..2222 100644
             .collect();
         assert!(meta_lines.iter().any(|l| l.text.contains("No newline")));
     }
+
+    #[test]
+    fn build_working_tree_diff_reports_clean_tree() {
+        let diff = build_working_tree_diff("main", &[], "", &HashMap::new(), "", &HashMap::new());
+        assert_eq!(diff.base_ref.as_deref(), Some("working tree"));
+        assert_eq!(diff.lines.len(), 1);
+        assert!(diff.lines[0].text.contains("clean"));
+    }
+
+    #[test]
+    fn load_working_tree_status_captures_staged_unstaged_and_untracked_changes() {
+        let repo_root = unique_temp_dir("status-view");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("staged.txt"), "before\n").unwrap();
+        fs::write(repo_root.join("unstaged.txt"), "before\n").unwrap();
+        run_git(&repo_root, &["add", "staged.txt", "unstaged.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+
+        fs::write(repo_root.join("staged.txt"), "after staged\n").unwrap();
+        fs::write(repo_root.join("unstaged.txt"), "after unstaged\n").unwrap();
+        fs::write(repo_root.join("untracked.txt"), "brand new\n").unwrap();
+        run_git(&repo_root, &["add", "staged.txt"]);
+
+        let diff = load_working_tree_status(&repo_root, "main").unwrap();
+        let text: Vec<_> = diff.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(diff.base_ref.as_deref(), Some("working tree"));
+        assert!(text
+            .iter()
+            .any(|line| line.contains("1 staged, 1 unstaged, 1 untracked")));
+        assert!(text.iter().any(|line| line.contains("Staged Changes")));
+        assert!(text.iter().any(|line| line.contains("Unstaged Changes")));
+        assert!(text.iter().any(|line| line.contains("Untracked Files")));
+        assert!(text.iter().any(|line| line.contains("staged.txt")));
+        assert!(text.iter().any(|line| line.contains("unstaged.txt")));
+        assert!(text.iter().any(|line| line.contains("untracked.txt")));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
 }
 
 fn discover_repo_root(start: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(start)
-        .output()
+    let output = run_git_command(start, &["rev-parse", "--show-toplevel"])
         .context("failed to run git rev-parse --show-toplevel")?;
 
     if !output.status.success() {
