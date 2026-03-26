@@ -29,8 +29,17 @@ pub struct BranchInfo {
 pub struct BranchDiff {
     pub branch_name: String,
     pub base_ref: Option<String>,
+    pub title: Option<String>,
     pub lines: Vec<DiffLine>,
     pub file_positions: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitSummary {
+    pub oid: String,
+    pub short_oid: String,
+    pub subject: String,
+    pub committed_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +143,7 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
         return Ok(BranchDiff {
             branch_name: branch.name.clone(),
             base_ref,
+            title: None,
             lines: vec![DiffLine {
                 kind: DiffLineKind::Meta,
                 text: "No base branch available for diff.".to_string(),
@@ -170,6 +180,67 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
     Ok(parse_diff(
         branch.name.clone(),
         Some(base_ref_name),
+        None,
+        &patch,
+        &stat_map,
+    ))
+}
+
+pub fn load_branch_commits(root: &Path, branch: &BranchInfo) -> Result<Vec<CommitSummary>> {
+    let _timer = perf::ScopeTimer::new(format!("load_branch_commits branch={}", branch.name));
+    let Some(base_ref_name) = branch.base_ref.as_deref() else {
+        return Ok(Vec::new());
+    };
+
+    let merge_base = git(root, ["merge-base", &branch.name, base_ref_name])?;
+    let merge_base = merge_base.trim();
+    if merge_base.is_empty() {
+        return Err(anyhow!(
+            "merge-base was empty for {} and {}",
+            branch.name,
+            base_ref_name
+        ));
+    }
+
+    let log_output = git(
+        root,
+        [
+            "log",
+            "--format=%H\t%h\t%cs\t%s",
+            &format!("{merge_base}..{}", branch.name),
+        ],
+    )?;
+
+    Ok(parse_commit_summaries(&log_output))
+}
+
+pub fn load_commit_diff(
+    root: &Path,
+    branch_name: &str,
+    commit: &CommitSummary,
+) -> Result<BranchDiff> {
+    let _timer = perf::ScopeTimer::new(format!("load_commit_diff commit={}", commit.short_oid));
+    let patch = git(
+        root,
+        [
+            "show",
+            "--format=",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            &commit.oid,
+        ],
+    )?;
+    let stats = git(root, ["show", "--format=", "--numstat", &commit.oid])?;
+    let stat_map = parse_numstat(&stats);
+
+    Ok(parse_diff(
+        branch_name.to_string(),
+        Some(commit.oid.clone()),
+        Some(format!(
+            "{} @ {} {}",
+            branch_name, commit.short_oid, commit.subject
+        )),
         &patch,
         &stat_map,
     ))
@@ -348,6 +419,7 @@ fn build_working_tree_diff(
         return BranchDiff {
             branch_name: branch_name.to_string(),
             base_ref: Some("working tree".to_string()),
+            title: None,
             lines,
             file_positions,
         };
@@ -396,6 +468,7 @@ fn build_working_tree_diff(
     BranchDiff {
         branch_name: branch_name.to_string(),
         base_ref: Some("working tree".to_string()),
+        title: None,
         lines,
         file_positions,
     }
@@ -418,7 +491,7 @@ fn append_status_section(
         file_path: None,
     });
 
-    let section = parse_diff(String::new(), None, patch, stat_map);
+    let section = parse_diff(String::new(), None, None, patch, stat_map);
     let offset = lines.len();
     file_positions.extend(
         section
@@ -451,9 +524,33 @@ pub(crate) fn parse_numstat(output: &str) -> HashMap<String, (String, String)> {
     stats
 }
 
+fn parse_commit_summaries(output: &str) -> Vec<CommitSummary> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            let oid = parts.next()?.trim();
+            let short_oid = parts.next()?.trim();
+            let committed_at = parts.next()?.trim();
+            let subject = parts.next()?.trim();
+            if oid.is_empty() || short_oid.is_empty() || subject.is_empty() {
+                return None;
+            }
+
+            Some(CommitSummary {
+                oid: oid.to_string(),
+                short_oid: short_oid.to_string(),
+                subject: subject.to_string(),
+                committed_at: committed_at.to_string(),
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn parse_diff(
     branch_name: String,
     base_ref: Option<String>,
+    title: Option<String>,
     patch: &str,
     stat_map: &HashMap<String, (String, String)>,
 ) -> BranchDiff {
@@ -529,6 +626,7 @@ pub(crate) fn parse_diff(
     BranchDiff {
         branch_name,
         base_ref,
+        title,
         lines,
         file_positions,
     }
@@ -675,7 +773,13 @@ mod tests {
 
     #[test]
     fn parse_diff_empty_patch() {
-        let diff = parse_diff("feature".into(), Some("main".into()), "", &HashMap::new());
+        let diff = parse_diff(
+            "feature".into(),
+            Some("main".into()),
+            None,
+            "",
+            &HashMap::new(),
+        );
         assert_eq!(diff.branch_name, "feature");
         assert_eq!(diff.base_ref.as_deref(), Some("main"));
         assert_eq!(diff.lines.len(), 1);
@@ -697,7 +801,7 @@ index 0000000..ce01362
         let mut stats = HashMap::new();
         stats.insert("hello.txt".to_string(), ("2".to_string(), "0".to_string()));
 
-        let diff = parse_diff("feat".into(), Some("main".into()), patch, &stats);
+        let diff = parse_diff("feat".into(), Some("main".into()), None, patch, &stats);
         assert_eq!(diff.branch_name, "feat");
         assert_eq!(diff.file_positions, vec![0]);
 
@@ -731,7 +835,7 @@ index abc1234..def5678 100644
         let mut stats = HashMap::new();
         stats.insert("src/lib.rs".to_string(), ("1".to_string(), "1".to_string()));
 
-        let diff = parse_diff("fix".into(), None, patch, &stats);
+        let diff = parse_diff("fix".into(), None, None, patch, &stats);
         assert_eq!(diff.file_positions, vec![0]);
         assert_eq!(diff.lines[0].kind, DiffLineKind::File);
         assert!(diff.lines[0].text.contains("src/lib.rs"));
@@ -761,7 +865,7 @@ index 3333..4444 100644
 -foo
 +bar";
         let stats = HashMap::new();
-        let diff = parse_diff("multi".into(), Some("main".into()), patch, &stats);
+        let diff = parse_diff("multi".into(), Some("main".into()), None, patch, &stats);
         assert_eq!(diff.file_positions.len(), 2);
         assert_eq!(diff.lines[diff.file_positions[0]].kind, DiffLineKind::File);
         assert!(diff.lines[diff.file_positions[0]].text.contains("a.txt"));
@@ -776,7 +880,7 @@ diff --git a/image.png b/image.png
 index 1111..2222 100644
 Binary files a/image.png and b/image.png differ";
         let stats = HashMap::new();
-        let diff = parse_diff("bin".into(), None, patch, &stats);
+        let diff = parse_diff("bin".into(), None, None, patch, &stats);
         assert!(diff
             .lines
             .iter()
@@ -797,7 +901,7 @@ index 1111..2222 100644
 -old
 +new";
         let stats = HashMap::new();
-        let diff = parse_diff("rename".into(), None, patch, &stats);
+        let diff = parse_diff("rename".into(), None, None, patch, &stats);
         // rename from/to lines should be skipped, file header emitted
         assert_eq!(diff.file_positions.len(), 1);
         assert_eq!(diff.lines[0].kind, DiffLineKind::File);
@@ -814,7 +918,7 @@ index 1111..2222 100644
 -old
 +new";
         let stats = HashMap::new();
-        let diff = parse_diff("fp".into(), None, patch, &stats);
+        let diff = parse_diff("fp".into(), None, None, patch, &stats);
         // Code lines should have file_path set
         for line in &diff.lines {
             if matches!(line.kind, DiffLineKind::Add | DiffLineKind::Del) {
@@ -835,7 +939,7 @@ index 1111..2222 100644
 +new
 \\ No newline at end of file";
         let stats = HashMap::new();
-        let diff = parse_diff("nonl".into(), None, patch, &stats);
+        let diff = parse_diff("nonl".into(), None, None, patch, &stats);
         let meta_lines: Vec<_> = diff
             .lines
             .iter()
@@ -882,6 +986,50 @@ index 1111..2222 100644
         assert!(text.iter().any(|line| line.contains("staged.txt")));
         assert!(text.iter().any(|line| line.contains("unstaged.txt")));
         assert!(text.iter().any(|line| line.contains("untracked.txt")));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn load_branch_commits_and_commit_diff_follow_branch_history() {
+        let repo_root = unique_temp_dir("commit-breakdown");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+
+        run_git(&repo_root, &["checkout", "-b", "feature"]);
+        fs::write(repo_root.join("notes.txt"), "base\nfirst\n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "first change"]);
+        fs::write(repo_root.join("notes.txt"), "base\nfirst\nsecond\n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "second change"]);
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let branch = repo
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature")
+            .unwrap();
+
+        let commits = load_branch_commits(&repo_root, branch).unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "second change");
+        assert_eq!(commits[1].subject, "first change");
+
+        let diff = load_commit_diff(&repo_root, "feature", &commits[0]).unwrap();
+        assert_eq!(diff.branch_name, "feature");
+        assert!(diff
+            .title
+            .as_deref()
+            .is_some_and(|title| title.contains("second change")));
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| line.text.contains("notes.txt")));
 
         fs::remove_dir_all(repo_root).unwrap();
     }

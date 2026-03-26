@@ -13,8 +13,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use git::{
-    load_branch_diff, load_commit_counts, load_working_tree_status, open_repo, refresh_repo,
-    BranchDiff, BranchInfo, DetailKind, RepoState,
+    load_branch_commits, load_branch_diff, load_commit_counts, load_commit_diff,
+    load_working_tree_status, open_repo, refresh_repo, BranchDiff, BranchInfo, CommitSummary,
+    DetailKind, RepoState,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
@@ -73,6 +74,22 @@ struct DiffPreloadResult {
     preloaded: Result<PreloadedBranchDiff, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BranchDetailDiffMode {
+    Branch,
+    Commit { selected_index: usize },
+}
+
+#[derive(Debug, Clone)]
+struct BranchDetailState {
+    branch_name: String,
+    commits: Vec<CommitSummary>,
+    commit_list_open: bool,
+    commit_list_selected: usize,
+    diff_mode: BranchDetailDiffMode,
+    info_overlay: Option<Vec<String>>,
+}
+
 struct App {
     config: AppConfig,
     repo: RepoState,
@@ -103,6 +120,7 @@ struct App {
     preloaded_diffs: HashMap<String, PreloadedBranchDiff>,
     diff_preload_failures: HashMap<String, String>,
     pending_diff_preloads: HashSet<String>,
+    branch_detail: Option<BranchDetailState>,
 }
 
 impl App {
@@ -141,6 +159,7 @@ impl App {
             preloaded_diffs: HashMap::new(),
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: HashSet::new(),
+            branch_detail: None,
         };
         app.reload_stack_decorations_async();
         app.reload_commit_counts_async();
@@ -196,6 +215,11 @@ impl App {
                         self.diff_scroll,
                         self.show_help,
                         self.focus,
+                        self.commit_list_overlay_items(),
+                        self.commit_list_overlay_selected(),
+                        self.branch_detail
+                            .as_ref()
+                            .and_then(|detail| detail.info_overlay.as_deref()),
                         if self.search_mode {
                             Some(self.search_input.as_str())
                         } else {
@@ -293,23 +317,27 @@ impl App {
     }
 
     fn handle_detail_keys(&mut self, key: KeyEvent) -> Result<()> {
+        if self.dismiss_info_overlay_if_open() {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc => self.close_detail(),
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    FocusedPane::BranchList => FocusedPane::Diff,
-                    FocusedPane::Diff => FocusedPane::BranchList,
-                };
-            }
+            KeyCode::Tab => self.toggle_detail_tab_behavior(),
             _ => match self.focus {
                 FocusedPane::BranchList => self.handle_branch_list_keys(key)?,
-                FocusedPane::Diff => self.handle_diff_keys(key),
+                FocusedPane::Diff => self.handle_diff_keys(key)?,
             },
         }
         Ok(())
     }
 
-    fn handle_diff_keys(&mut self, key: KeyEvent) {
+    fn handle_diff_keys(&mut self, key: KeyEvent) -> Result<()> {
+        if self.commit_list_is_open() {
+            self.handle_commit_list_keys(key)?;
+            return Ok(());
+        }
+
         let visible = 15usize;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.scroll_diff(1),
@@ -334,8 +362,23 @@ impl App {
             }
             KeyCode::Char('n') => self.advance_match(1),
             KeyCode::Char('N') => self.advance_match(-1),
+            KeyCode::Char('i')
+                if self.detail_kind == Some(DetailKind::BranchDiff)
+                    && self.branch_detail.is_some() =>
+            {
+                self.show_branch_info_overlay();
+            }
+            KeyCode::Backspace
+                if matches!(
+                    self.branch_detail.as_ref().map(|detail| &detail.diff_mode),
+                    Some(BranchDetailDiffMode::Commit { .. })
+                ) =>
+            {
+                self.restore_branch_level_diff()?;
+            }
             _ => {}
         }
+        Ok(())
     }
 
     fn handle_search_input(&mut self, key: KeyEvent) {
@@ -462,17 +505,27 @@ impl App {
                 self.highlighted_diff = Some(preloaded.highlighted_diff);
                 self.branch_diff = Some(preloaded.diff);
             } else {
-                let preloaded = preload_branch_diff(&self.repo.root, branch)?;
+                let preloaded = preload_branch_diff(&self.repo.root, branch.clone())?;
                 self.preloaded_diffs
                     .insert(branch_name.clone(), preloaded.clone());
                 self.highlighted_diff = Some(preloaded.highlighted_diff);
                 self.branch_diff = Some(preloaded.diff);
             }
         }
+        let commits = load_branch_commits(&self.repo.root, &branch)?;
         self.detail_kind = Some(DetailKind::BranchDiff);
+        self.branch_detail = Some(BranchDetailState {
+            branch_name,
+            commits,
+            commit_list_open: false,
+            commit_list_selected: 0,
+            diff_mode: BranchDetailDiffMode::Branch,
+            info_overlay: None,
+        });
         self.show_stack_view = false;
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
+        self.search_input.clear();
         self.search_matches.clear();
         self.search_cursor = 0;
         Ok(())
@@ -497,6 +550,7 @@ impl App {
         let diff = load_working_tree_status(&self.repo.root, &branch.name)?;
         let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
         self.detail_kind = Some(DetailKind::Status);
+        self.branch_detail = None;
         self.branch_diff = Some(diff);
         self.highlighted_diff = Some(highlighted_diff);
         self.show_stack_view = false;
@@ -510,6 +564,7 @@ impl App {
 
     fn close_detail(&mut self) {
         self.detail_kind = None;
+        self.branch_detail = None;
         self.branch_diff = None;
         self.highlighted_diff = None;
         self.diff_scroll = 0;
@@ -549,19 +604,35 @@ impl App {
         if let Some(detail_kind) = self.detail_kind {
             match detail_kind {
                 DetailKind::BranchDiff => {
-                    if let Some(current_diff) = &self.branch_diff {
-                        if let Some(branch) =
-                            branch_for_diff(&self.repo, &self.stack_info, &current_diff.branch_name)
-                        {
-                            let preloaded = preload_branch_diff(&self.repo.root, branch)?;
-                            self.preloaded_diffs
-                                .insert(current_diff.branch_name.clone(), preloaded.clone());
-                            self.highlighted_diff = Some(preloaded.highlighted_diff);
-                            self.branch_diff = Some(preloaded.diff);
-                            self.refresh_search_matches();
-                        } else {
-                            self.close_detail();
+                    let Some(branch_name) = self
+                        .branch_detail
+                        .as_ref()
+                        .map(|detail| detail.branch_name.clone())
+                    else {
+                        self.close_detail();
+                        return Ok(());
+                    };
+
+                    if let Some(branch) =
+                        branch_for_diff(&self.repo, &self.stack_info, &branch_name)
+                    {
+                        let preloaded = preload_branch_diff(&self.repo.root, branch.clone())?;
+                        self.preloaded_diffs
+                            .insert(branch_name.clone(), preloaded.clone());
+                        self.highlighted_diff = Some(preloaded.highlighted_diff);
+                        self.branch_diff = Some(preloaded.diff);
+                        if let Some(detail) = &mut self.branch_detail {
+                            detail.commits = load_branch_commits(&self.repo.root, &branch)?;
+                            detail.commit_list_selected = detail
+                                .commit_list_selected
+                                .min(detail.commits.len().saturating_sub(1));
+                            detail.commit_list_open = false;
+                            detail.diff_mode = BranchDetailDiffMode::Branch;
+                            detail.info_overlay = None;
                         }
+                        self.refresh_search_matches();
+                    } else {
+                        self.close_detail();
                     }
                 }
                 DetailKind::Status => {
@@ -914,6 +985,205 @@ impl App {
         mem::take(&mut self.search_input);
         Ok(())
     }
+
+    fn toggle_detail_tab_behavior(&mut self) {
+        if self.detail_kind == Some(DetailKind::BranchDiff) && self.branch_detail.is_some() {
+            if let Some(detail) = &mut self.branch_detail {
+                detail.info_overlay = None;
+                detail.commit_list_open = !detail.commit_list_open;
+            }
+            return;
+        }
+
+        self.focus = match self.focus {
+            FocusedPane::BranchList => FocusedPane::Diff,
+            FocusedPane::Diff => FocusedPane::BranchList,
+        };
+    }
+
+    fn commit_list_is_open(&self) -> bool {
+        self.branch_detail
+            .as_ref()
+            .map(|detail| detail.commit_list_open)
+            .unwrap_or(false)
+    }
+
+    fn commit_list_overlay_items(&self) -> Option<Vec<String>> {
+        let detail = self.branch_detail.as_ref()?;
+        if !detail.commit_list_open {
+            return None;
+        }
+
+        if detail.commits.is_empty() {
+            return Some(vec!["No commits above the current base branch.".to_string()]);
+        }
+
+        Some(
+            detail
+                .commits
+                .iter()
+                .map(|commit| {
+                    format!(
+                        "{:<8}  {:<10}  {}",
+                        commit.short_oid, commit.committed_at, commit.subject
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn commit_list_overlay_selected(&self) -> Option<usize> {
+        self.branch_detail.as_ref().and_then(|detail| {
+            detail
+                .commit_list_open
+                .then_some(detail.commit_list_selected)
+        })
+    }
+
+    fn handle_commit_list_keys(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(detail) = &mut self.branch_detail else {
+            return Ok(());
+        };
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !detail.commits.is_empty() {
+                    detail.commit_list_selected =
+                        (detail.commit_list_selected + 1).min(detail.commits.len() - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                detail.commit_list_selected = detail.commit_list_selected.saturating_sub(1);
+            }
+            KeyCode::Char('g') if key.modifiers.is_empty() => {
+                detail.commit_list_selected = 0;
+            }
+            KeyCode::Char('G') => {
+                if !detail.commits.is_empty() {
+                    detail.commit_list_selected = detail.commits.len() - 1;
+                }
+            }
+            KeyCode::Enter => self.open_selected_commit_diff()?,
+            KeyCode::Tab => detail.commit_list_open = false,
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn open_selected_commit_diff(&mut self) -> Result<()> {
+        let Some(detail) = &mut self.branch_detail else {
+            return Ok(());
+        };
+        let Some(commit) = detail.commits.get(detail.commit_list_selected).cloned() else {
+            return Ok(());
+        };
+
+        let diff = load_commit_diff(&self.repo.root, &detail.branch_name, &commit)?;
+        let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
+        self.branch_diff = Some(diff);
+        self.highlighted_diff = Some(highlighted_diff);
+        detail.diff_mode = BranchDetailDiffMode::Commit {
+            selected_index: detail.commit_list_selected,
+        };
+        detail.commit_list_open = false;
+        self.diff_scroll = 0;
+        self.search_input.clear();
+        self.search_matches.clear();
+        self.search_cursor = 0;
+        Ok(())
+    }
+
+    fn restore_branch_level_diff(&mut self) -> Result<()> {
+        let Some(branch_name) = self
+            .branch_detail
+            .as_ref()
+            .map(|detail| detail.branch_name.clone())
+        else {
+            return Ok(());
+        };
+        let Some(preloaded) = self
+            .preloaded_diffs
+            .get(&branch_name)
+            .cloned()
+            .or_else(|| self.wait_for_preloaded_diff(&branch_name))
+        else {
+            return Ok(());
+        };
+        self.branch_diff = Some(preloaded.diff);
+        self.highlighted_diff = Some(preloaded.highlighted_diff);
+        if let Some(detail) = &mut self.branch_detail {
+            detail.diff_mode = BranchDetailDiffMode::Branch;
+        }
+        self.diff_scroll = 0;
+        self.search_input.clear();
+        self.search_matches.clear();
+        self.search_cursor = 0;
+        Ok(())
+    }
+
+    fn show_branch_info_overlay(&mut self) {
+        let Some(detail) = &mut self.branch_detail else {
+            return;
+        };
+        let Some(branch) = self
+            .repo
+            .branches
+            .iter()
+            .find(|branch| branch.name == detail.branch_name)
+        else {
+            return;
+        };
+
+        let stack_position = self
+            .stack_info
+            .stacks
+            .iter()
+            .find_map(|stack| {
+                stack
+                    .branches
+                    .iter()
+                    .position(|name| name == &detail.branch_name)
+                    .map(|index| {
+                        format!(
+                            "{} of {} in {}",
+                            index + 1,
+                            stack.branches.len(),
+                            stack.name
+                        )
+                    })
+            })
+            .unwrap_or_else(|| "standalone".to_string());
+        let remote_status = match (&branch.upstream, branch.ahead, branch.behind) {
+            (Some(upstream), 0, 0) => format!("{upstream} (in sync)"),
+            (Some(upstream), ahead, behind) => {
+                format!("{upstream} (ahead {ahead}, behind {behind})")
+            }
+            (None, _, _) => "no upstream".to_string(),
+        };
+
+        detail.info_overlay = Some(vec![
+            format!("Branch: {}", detail.branch_name),
+            format!(
+                "Base branch: {}",
+                branch.base_ref.as_deref().unwrap_or("none")
+            ),
+            format!("Remote status: {remote_status}"),
+            format!("Worktree: {}", self.repo.root.display()),
+            format!("Stack position: {stack_position}"),
+        ]);
+        detail.commit_list_open = false;
+    }
+
+    fn dismiss_info_overlay_if_open(&mut self) -> bool {
+        if let Some(detail) = &mut self.branch_detail {
+            if detail.info_overlay.is_some() {
+                detail.info_overlay = None;
+                return true;
+            }
+        }
+        false
+    }
 }
 
 fn load_initial_stack_info(repo: &RepoState) -> StackInfo {
@@ -1116,6 +1386,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_branch(name: &str) -> BranchInfo {
@@ -1151,6 +1422,48 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("gl-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    fn run_git(root: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .or_else(|_| {
+                Command::new("/usr/bin/git")
+                    .args(args)
+                    .current_dir(root)
+                    .output()
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_commit_breakdown_repo() -> (PathBuf, RepoState) {
+        let repo_root = unique_temp_dir("commit-breakdown");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+
+        run_git(&repo_root, &["checkout", "-b", "a1"]);
+        fs::write(repo_root.join("notes.txt"), "base\nfirst\n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "first change"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\nfirst\nsecond\n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "second change"]);
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        (repo_root, repo)
     }
 
     fn empty_stacks() -> StackInfo {
@@ -1482,6 +1795,7 @@ mod tests {
             preloaded_diffs: HashMap::new(),
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: std::collections::HashSet::new(),
+            branch_detail: None,
         }
     }
 
@@ -1716,6 +2030,7 @@ mod tests {
                     diff: BranchDiff {
                         branch_name: "a1".into(),
                         base_ref: Some("main".into()),
+                        title: None,
                         lines: vec![],
                         file_positions: vec![],
                     },
@@ -1732,14 +2047,20 @@ mod tests {
 
     #[test]
     fn open_selected_branch_uses_preloaded_diff_without_git_roundtrip() {
-        let mut app = make_test_app(make_test_entries());
-        app.selected_index = 1;
+        let (repo_root, repo) = make_commit_breakdown_repo();
+        let mut app = App::new(AppConfig::default(), repo, empty_stacks());
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a1")
+            .unwrap();
         app.preloaded_diffs.insert(
             "a1".into(),
             PreloadedBranchDiff {
                 diff: BranchDiff {
                     branch_name: "a1".into(),
                     base_ref: Some("main".into()),
+                    title: None,
                     lines: vec![],
                     file_positions: vec![],
                 },
@@ -1763,6 +2084,98 @@ mod tests {
             Some("preloaded")
         );
         assert_eq!(app.detail_kind, Some(DetailKind::BranchDiff));
+        assert_eq!(
+            app.branch_detail
+                .as_ref()
+                .map(|detail| detail.commits.len()),
+            Some(2)
+        );
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn branch_detail_commit_breakdown_opens_commit_diff_and_restores_branch_diff() {
+        let (repo_root, repo) = make_commit_breakdown_repo();
+        let mut app = App::new(AppConfig::default(), repo, empty_stacks());
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a1")
+            .unwrap();
+
+        app.open_selected_branch().unwrap();
+        assert_eq!(
+            app.branch_detail
+                .as_ref()
+                .map(|detail| detail.commits.len()),
+            Some(2)
+        );
+
+        app.handle_detail_keys(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.commit_list_is_open());
+
+        app.handle_diff_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(
+            app.branch_detail.as_ref().map(|detail| &detail.diff_mode),
+            Some(BranchDetailDiffMode::Commit { .. })
+        ));
+        let title = app
+            .branch_diff
+            .as_ref()
+            .and_then(|diff| diff.title.as_deref())
+            .unwrap();
+        assert!(title.starts_with("a1 @ "));
+        assert!(title.contains("second change"));
+
+        app.handle_diff_keys(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.branch_diff
+                .as_ref()
+                .map(|diff| diff.branch_name.as_str()),
+            Some("a1")
+        );
+        assert!(matches!(
+            app.branch_detail.as_ref().map(|detail| &detail.diff_mode),
+            Some(BranchDetailDiffMode::Branch)
+        ));
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn branch_detail_info_overlay_dismisses_on_next_key() {
+        let (repo_root, repo) = make_commit_breakdown_repo();
+        let mut app = App::new(AppConfig::default(), repo, empty_stacks());
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a1")
+            .unwrap();
+
+        app.open_selected_branch().unwrap();
+        app.handle_diff_keys(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+            .unwrap();
+        let overlay = app
+            .branch_detail
+            .as_ref()
+            .and_then(|detail| detail.info_overlay.as_ref())
+            .cloned()
+            .unwrap();
+        assert!(overlay
+            .iter()
+            .any(|line| line.contains("Base branch: main")));
+        assert!(overlay.iter().any(|line| line.contains("Worktree:")));
+
+        app.handle_detail_keys(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app
+            .branch_detail
+            .as_ref()
+            .and_then(|detail| detail.info_overlay.as_ref())
+            .is_none());
+        fs::remove_dir_all(repo_root).unwrap();
     }
 
     #[test]

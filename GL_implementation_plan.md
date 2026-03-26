@@ -150,7 +150,14 @@ Delivered:
 
 ### Phase 8: Commit Breakdown
 
-**Status:** Not started
+**Status:** Complete
+
+Delivered:
+
+- `Tab` opens a commit list overlay in Branch Detail View with hash, subject, and commit date
+- `Enter` opens the selected commit diff, and `Backspace` returns to the branch-level diff
+- `i` opens a transient branch metadata overlay showing base branch, remote status, worktree path, and stack position
+- behavior tests cover commit list loading, commit diff inspection, and overlay dismissal
 
 ### Phase 9: Graph View
 
@@ -203,17 +210,15 @@ The current implementation has already delivered the core product loop, so the r
 
 Recommended implementation order for the remaining phases:
 
-1. `Phase 8: Commit Breakdown`
-   Extends branch and stack inspection into commit-level drill-down.
-2. `Phase 10: Filesystem Watching and Background Refresh`
+1. `Phase 10: Filesystem Watching and Background Refresh`
    Becomes more valuable once multiple read surfaces benefit from staying warm.
-3. `Phase 11: Side-by-Side Diff and Diff Options`
+2. `Phase 11: Side-by-Side Diff and Diff Options`
    Improves the core diff experience after the main review views are in place.
-4. `Phase 9: Graph View`
+3. `Phase 9: Graph View`
    Useful, but more specialized than status and commit inspection.
-5. `Phase 12: Command Line, Config, and Polish`
+4. `Phase 12: Command Line, Config, and Polish`
    Best handled after the product surface is more stable.
-6. `Phase 6: Worktree Support`
+5. `Phase 6: Worktree Support`
    Still the broadest feature, so it should wait until the viewer workflow is deeper.
 
 Short-term tightening work that can happen alongside the next phase:
@@ -347,6 +352,8 @@ Short-term tightening work that can happen alongside the next phase:
 3. Build the info overlay (`i` key): transient display of branch metadata — base branch, remote status, worktree path, stack position. Dismisses on any key.
 
 **Deliverable:** You can break a branch down into its constituent commits and inspect each one.
+
+**Status:** Complete
 
 ---
 
