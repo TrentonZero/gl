@@ -1,8 +1,8 @@
 use crate::git::RepoState;
 use crate::perf;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -105,6 +105,21 @@ pub fn detect_stacks(root: &Path, repo: &RepoState, allow_cache: bool) -> StackI
     stack_info
 }
 
+pub fn detect_stacks_cached(root: &Path, repo: &RepoState) -> StackInfo {
+    let _timer = perf::ScopeTimer::new("detect_stacks_cached");
+    let signature = stack_cache_signature(repo);
+    if let Some(cached) = load_stack_cache(root, &signature) {
+        perf::log("stack cache exact hit");
+        return cached;
+    }
+    if let Some(cached) = load_stack_cache_preview(root, repo) {
+        perf::log("stack cache preview hit");
+        return cached;
+    }
+    perf::log("stack cache miss");
+    StackInfo::empty()
+}
+
 pub fn enrich_stacks(root: &Path, stack_info: &StackInfo) -> StackInfo {
     let _timer = perf::ScopeTimer::new(format!(
         "enrich_stacks stacks={} parents={}",
@@ -151,9 +166,7 @@ fn stack_cache_signature(repo: &RepoState) -> String {
 }
 
 fn load_stack_cache(root: &Path, signature: &str) -> Option<StackInfo> {
-    let path = stack_cache_path(root)?;
-    let contents = fs::read_to_string(path).ok()?;
-    let entry: StackCacheEntry = toml::from_str(&contents).ok()?;
+    let entry = load_stack_cache_entry(root)?;
     if entry.version != STACK_CACHE_VERSION || entry.signature != signature {
         return None;
     }
@@ -164,6 +177,92 @@ fn load_stack_cache(root: &Path, signature: &str) -> Option<StackInfo> {
         branch_to_parent: entry.stack_info.branch_to_parent,
         stale_branches: HashSet::new(),
     })
+}
+
+fn load_stack_cache_preview(root: &Path, repo: &RepoState) -> Option<StackInfo> {
+    let entry = load_stack_cache_entry(root)?;
+    if entry.version != STACK_CACHE_VERSION {
+        return None;
+    }
+
+    let preview = sanitize_cached_stack_info(repo, &entry.stack_info);
+    (!preview.stacks.is_empty()
+        || !preview.branch_to_parent.is_empty()
+        || !preview.standalone.is_empty())
+    .then_some(preview)
+}
+
+fn load_stack_cache_entry(root: &Path) -> Option<StackCacheEntry> {
+    let path = stack_cache_path(root)?;
+    let contents = fs::read_to_string(path).ok()?;
+    toml::from_str(&contents).ok()
+}
+
+fn sanitize_cached_stack_info(repo: &RepoState, cached: &CachedStackInfo) -> StackInfo {
+    let available: HashSet<_> = repo
+        .branches
+        .iter()
+        .map(|branch| branch.name.clone())
+        .collect();
+    let mut stacks = Vec::new();
+    let mut standalone = Vec::new();
+    let mut used = HashSet::new();
+
+    for stack in &cached.stacks {
+        let filtered: Vec<_> = stack
+            .branches
+            .iter()
+            .filter(|branch| available.contains(*branch))
+            .cloned()
+            .collect();
+
+        match filtered.len() {
+            0 => {}
+            1 => push_unique(&mut standalone, &filtered[0]),
+            _ => {
+                for branch in &filtered {
+                    used.insert(branch.clone());
+                }
+                stacks.push(Stack {
+                    name: stack.name.clone(),
+                    branches: filtered,
+                });
+            }
+        }
+    }
+
+    for branch in &cached.standalone {
+        if available.contains(branch) && !used.contains(branch) {
+            push_unique(&mut standalone, branch);
+            used.insert(branch.clone());
+        }
+    }
+
+    for branch in &repo.branches {
+        if !used.contains(&branch.name) {
+            push_unique(&mut standalone, &branch.name);
+        }
+    }
+
+    let branch_to_parent = cached
+        .branch_to_parent
+        .iter()
+        .filter(|(branch, parent)| available.contains(*branch) && available.contains(*parent))
+        .map(|(branch, parent)| (branch.clone(), parent.clone()))
+        .collect();
+
+    StackInfo {
+        stacks,
+        standalone,
+        branch_to_parent,
+        stale_branches: HashSet::new(),
+    }
+}
+
+fn push_unique(names: &mut Vec<String>, name: &str) {
+    if !names.iter().any(|existing| existing == name) {
+        names.push(name.to_string());
+    }
 }
 
 fn write_stack_cache(root: &Path, signature: &str, stack_info: &StackInfo) {
@@ -194,6 +293,12 @@ fn write_stack_cache(root: &Path, signature: &str, stack_info: &StackInfo) {
     let _ = fs::write(path, serialized);
 }
 
+#[cfg(test)]
+pub(crate) fn write_stack_cache_for_test(root: &Path, repo: &RepoState, stack_info: &StackInfo) {
+    let signature = stack_cache_signature(repo);
+    write_stack_cache(root, &signature, stack_info);
+}
+
 fn stack_cache_path(root: &Path) -> Option<PathBuf> {
     let base = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -202,7 +307,11 @@ fn stack_cache_path(root: &Path) -> Option<PathBuf> {
     let mut hasher = DefaultHasher::new();
     root.hash(&mut hasher);
     let repo_key = format!("{:016x}", hasher.finish());
-    Some(base.join("gl").join("stacks").join(format!("{repo_key}.toml")))
+    Some(
+        base.join("gl")
+            .join("stacks")
+            .join(format!("{repo_key}.toml")),
+    )
 }
 
 /// Extract branch names from `gt log short` output, stripping ANSI codes and decorative glyphs.
@@ -216,7 +325,10 @@ pub(crate) fn parse_branch_names(output: &str) -> Vec<String> {
 
 fn parse_gt_log_short(output: &str) -> Vec<ParsedBranchLine> {
     let stripped = strip_ansi(output);
-    stripped.lines().filter_map(parse_gt_log_short_line).collect()
+    stripped
+        .lines()
+        .filter_map(parse_gt_log_short_line)
+        .collect()
 }
 
 fn parse_gt_log_short_line(line: &str) -> Option<ParsedBranchLine> {
@@ -498,6 +610,37 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{BranchInfo, RepoState};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_branch(name: &str) -> BranchInfo {
+        BranchInfo {
+            name: name.to_string(),
+            is_head: false,
+            object_id: format!("{name}-oid"),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_count: 0,
+            base_ref: Some("main".to_string()),
+        }
+    }
+
+    fn make_repo(root: PathBuf, branch_names: &[&str]) -> RepoState {
+        RepoState {
+            root,
+            branches: branch_names.iter().map(|name| make_branch(name)).collect(),
+        }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gl-{label}-{}-{nanos}", std::process::id()))
+    }
 
     // --- strip_ansi ---
 
@@ -667,7 +810,10 @@ mod tests {
         let parents = infer_branch_parents_from_gt_log(&lines);
         assert_eq!(parents.get("tip").map(String::as_str), Some("middle"));
         assert_eq!(parents.get("middle").map(String::as_str), Some("main"));
-        assert_eq!(parents.get("child-tip").map(String::as_str), Some("child-base"));
+        assert_eq!(
+            parents.get("child-tip").map(String::as_str),
+            Some("child-base")
+        );
         assert_eq!(parents.get("child-base").map(String::as_str), Some("main"));
         assert!(!parents.contains_key("main"));
     }
@@ -791,6 +937,65 @@ mod tests {
         assert_eq!(info.stacks.len(), 1);
         assert_eq!(info.stacks[0].branches, vec!["feat/base", "feat/top"]);
         assert_eq!(info.standalone, vec!["main", "fix"]);
+    }
+
+    #[test]
+    fn detect_stacks_cached_returns_empty_on_cache_miss() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let cache_home = unique_temp_dir("cache-miss");
+        std::env::set_var("XDG_CACHE_HOME", &cache_home);
+
+        let repo_root = unique_temp_dir("repo-miss");
+        let repo = make_repo(repo_root.clone(), &["feature", "main"]);
+
+        let info = detect_stacks_cached(&repo_root, &repo);
+        assert!(info.stacks.is_empty());
+        assert!(info.standalone.is_empty());
+        assert!(info.branch_to_parent.is_empty());
+
+        std::env::remove_var("XDG_CACHE_HOME");
+    }
+
+    #[test]
+    fn detect_stacks_cached_reads_cached_stack_structure() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let cache_home = unique_temp_dir("cache-hit");
+        std::env::set_var("XDG_CACHE_HOME", &cache_home);
+
+        let repo_root = unique_temp_dir("repo-hit");
+        let repo = make_repo(repo_root.clone(), &["feature-top", "feature-base", "main"]);
+        let cached = StackInfo {
+            stacks: vec![Stack {
+                name: "feature-base stack".to_string(),
+                branches: vec!["feature-base".to_string(), "feature-top".to_string()],
+            }],
+            standalone: vec!["main".to_string()],
+            branch_to_parent: HashMap::from([
+                ("feature-top".to_string(), "feature-base".to_string()),
+                ("feature-base".to_string(), "main".to_string()),
+            ]),
+            stale_branches: HashSet::from(["feature-top".to_string()]),
+        };
+
+        let signature = stack_cache_signature(&repo);
+        write_stack_cache(&repo_root, &signature, &cached);
+
+        let info = detect_stacks_cached(&repo_root, &repo);
+        assert_eq!(info.stacks.len(), 1);
+        assert_eq!(info.stacks[0].name, "feature-base stack");
+        assert_eq!(
+            info.stacks[0].branches,
+            vec!["feature-base".to_string(), "feature-top".to_string()]
+        );
+        assert_eq!(info.standalone, cached.standalone);
+        assert_eq!(info.branch_to_parent, cached.branch_to_parent);
+        assert!(info.stale_branches.is_empty());
+
+        std::env::remove_var("XDG_CACHE_HOME");
     }
 
     // --- StackInfo::stack_for_branch ---
