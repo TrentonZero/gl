@@ -280,6 +280,9 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-10)
             }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.open_selected_status()?
+            }
             KeyCode::Char('s') => self.toggle_stack_view(),
             KeyCode::Char('S') => self.open_selected_status()?,
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
@@ -943,7 +946,11 @@ fn build_stack_view(
         .collect();
     let selected_index = stack.branches.iter().position(|name| name == branch_name)?;
     let diff_branch = branch_for_diff(repo, stack_info, branch_name)?;
-    let parent_branch = (selected_index > 0).then(|| stack.branches[selected_index - 1].clone());
+    let parent_branch = if selected_index > 0 {
+        Some(stack.branches[selected_index - 1].clone())
+    } else {
+        diff_branch.base_ref.clone()
+    };
     let child_branch = stack.branches.get(selected_index + 1).cloned();
 
     let branches = stack
@@ -1581,6 +1588,28 @@ mod tests {
     }
 
     #[test]
+    fn build_stack_view_shows_trunk_as_parent_for_bottom_branch() {
+        let repo = make_repo(&["auth-base", "auth-ui", "main"]);
+        let stacks = StackInfo {
+            stacks: vec![Stack {
+                name: "auth stack".into(),
+                branches: vec!["auth-base".into(), "auth-ui".into()],
+            }],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::from([
+                ("auth-base".into(), "main".into()),
+                ("auth-ui".into(), "auth-base".into()),
+            ]),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+
+        let view = build_stack_view(&repo, &stacks, "auth-base").unwrap();
+        assert_eq!(view.parent_branch.as_deref(), Some("main"));
+        assert_eq!(view.child_branch.as_deref(), Some("auth-ui"));
+    }
+
+    #[test]
     fn toggle_stack_view_only_opens_for_branches_in_a_stack() {
         let repo = make_repo(&["auth-base", "auth-ui", "main"]);
         let stack_info = StackInfo {
@@ -1752,5 +1781,17 @@ mod tests {
                 .map(|diff| diff.base_ref.as_deref()),
             Some(Some("working tree"))
         );
+    }
+
+    #[test]
+    fn shift_s_opens_status_instead_of_toggling_stack_view() {
+        let mut app = make_test_app(make_test_entries());
+        app.selected_index = 6;
+
+        app.handle_branch_list_keys(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SHIFT))
+            .unwrap();
+
+        assert_eq!(app.detail_kind, Some(DetailKind::Status));
+        assert!(!app.show_stack_view);
     }
 }

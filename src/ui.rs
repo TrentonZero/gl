@@ -981,6 +981,26 @@ mod tests {
     }
 
     #[test]
+    fn stack_view_lines_render_trunk_parent_for_bottom_branch() {
+        let stack_view = StackView {
+            title: "auth stack".into(),
+            selected_branch: "auth-base".into(),
+            parent_branch: Some("main".into()),
+            child_branch: Some("auth-ui".into()),
+            base_ref: Some("main".into()),
+            stale: false,
+            branches: vec![],
+        };
+
+        let text: String = stack_view_lines(&stack_view)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .collect();
+        assert!(text.contains("Parent   main"));
+    }
+
+    #[test]
     fn stack_view_lines_include_selected_relationships() {
         let stack_view = StackView {
             title: "auth stack".into(),
