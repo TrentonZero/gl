@@ -17,7 +17,7 @@ use git::{
     RepoState,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
-use stack::{detect_stacks, enrich_stacks, StackInfo};
+use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
 use std::{
     env, io, mem,
     path::PathBuf,
@@ -166,6 +166,7 @@ impl App {
                         } else {
                             None
                         },
+                        stack_notice(&self.stack_info),
                     );
                 })?;
                 if !first_draw_logged {
@@ -678,6 +679,18 @@ fn load_initial_stack_info(repo: &RepoState) -> StackInfo {
     detect_stacks(&repo.root, repo, true)
 }
 
+fn stack_notice(stack_info: &StackInfo) -> Option<&'static str> {
+    match stack_info.detection_status {
+        StackDetectionStatus::Ready => None,
+        StackDetectionStatus::GraphiteUnavailable => {
+            Some("Graphite unavailable; showing inferred local branch relationships.")
+        }
+        StackDetectionStatus::GraphiteParseFailed => {
+            Some("Graphite stack parse failed; showing inferred local branch relationships.")
+        }
+    }
+}
+
 fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<BranchEntry> {
     let mut entries = Vec::new();
     let mut used_branches = std::collections::HashSet::new();
@@ -822,6 +835,7 @@ mod tests {
             standalone: vec![],
             branch_to_parent: HashMap::new(),
             stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         }
     }
 
@@ -849,6 +863,7 @@ mod tests {
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::new(),
             stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
 
         let entries = build_display_entries(&repo, &stacks);
@@ -872,6 +887,7 @@ mod tests {
             standalone: vec![],
             branch_to_parent: HashMap::new(),
             stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
 
         let entries = build_display_entries(&repo, &stacks);
@@ -906,6 +922,7 @@ mod tests {
             standalone: vec!["topic".into(), "main".into(), "fix".into()],
             branch_to_parent: HashMap::new(),
             stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
 
         let entries = build_display_entries(&repo, &stacks);
@@ -926,6 +943,7 @@ mod tests {
             standalone: vec!["main".into()],
             branch_to_parent,
             stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
 
         let branch = branch_for_diff(&repo, &stacks, "stack-top").unwrap();
@@ -946,6 +964,7 @@ mod tests {
                 ("alpha-base".into(), "main".into()),
             ]),
             stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
 
         let mut app = App::new(AppConfig::default(), repo, stack_info.clone());
@@ -958,9 +977,7 @@ mod tests {
         app.stack_request_id += 1;
         let request_id = app.stack_request_id;
         let mut decorated = stack_info;
-        decorated
-            .stale_branches
-            .insert("alpha-top".to_string());
+        decorated.stale_branches.insert("alpha-top".to_string());
         app.stack_result_tx
             .send(StackLoadResult {
                 request_id,

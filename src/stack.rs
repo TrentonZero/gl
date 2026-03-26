@@ -13,6 +13,14 @@ use std::thread;
 
 const STACK_CACHE_VERSION: u32 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StackDetectionStatus {
+    #[default]
+    Ready,
+    GraphiteUnavailable,
+    GraphiteParseFailed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedBranchLine {
     name: String,
@@ -26,6 +34,8 @@ pub struct StackInfo {
     pub standalone: Vec<String>,
     pub branch_to_parent: HashMap<String, String>,
     pub(crate) stale_branches: HashSet<String>,
+    #[serde(default)]
+    pub detection_status: StackDetectionStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +76,7 @@ impl StackInfo {
             standalone: vec![],
             branch_to_parent: HashMap::new(),
             stale_branches: HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         }
     }
 }
@@ -85,22 +96,25 @@ pub fn detect_stacks(root: &Path, repo: &RepoState, allow_cache: bool) -> StackI
     }
 
     let output = match gt_log_short(root) {
-        Some(output) => output,
-        None => return StackInfo::empty(),
+        Ok(output) => output,
+        Err(status) => return fallback_stack_info(repo, status),
     };
 
     let parsed = parse_gt_log_short(&output);
     if parsed.is_empty() {
-        return StackInfo::empty();
+        return fallback_stack_info(repo, StackDetectionStatus::GraphiteParseFailed);
     }
 
     let branches: Vec<String> = parsed.iter().map(|line| line.name.clone()).collect();
     let branch_to_parent = infer_branch_parents_from_gt_log(&parsed);
     if branch_to_parent.is_empty() {
-        return build_stacks_from_order(&branches);
+        let mut stack_info = build_stacks_from_order(&branches);
+        stack_info.detection_status = StackDetectionStatus::Ready;
+        return stack_info;
     }
 
-    let stack_info = build_stacks_from_parents(&branches, &branch_to_parent);
+    let mut stack_info = build_stacks_from_parents(&branches, &branch_to_parent);
+    stack_info.detection_status = StackDetectionStatus::Ready;
     write_stack_cache(root, &signature, &stack_info);
     stack_info
 }
@@ -121,19 +135,50 @@ pub fn enrich_stacks(root: &Path, stack_info: &StackInfo) -> StackInfo {
     enriched
 }
 
-fn gt_log_short(root: &Path) -> Option<String> {
+fn gt_log_short(root: &Path) -> Result<String, StackDetectionStatus> {
     let _timer = perf::ScopeTimer::new("gt log short");
     let output = Command::new("gt")
         .args(["log", "short", "--no-interactive"])
         .current_dir(root)
         .output()
-        .ok()?;
+        .map_err(|_| StackDetectionStatus::GraphiteUnavailable)?;
 
     if !output.status.success() {
-        return None;
+        return Err(StackDetectionStatus::GraphiteUnavailable);
     }
 
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn fallback_stack_info(repo: &RepoState, status: StackDetectionStatus) -> StackInfo {
+    let mut branch_to_parent = HashMap::new();
+    let branch_names: HashSet<&str> = repo
+        .branches
+        .iter()
+        .map(|branch| branch.name.as_str())
+        .collect();
+
+    for branch in &repo.branches {
+        let Some(base_ref) = branch.base_ref.as_deref() else {
+            continue;
+        };
+        if base_ref != branch.name && branch_names.contains(base_ref) {
+            branch_to_parent.insert(branch.name.clone(), base_ref.to_string());
+        }
+    }
+
+    let branch_names: Vec<String> = repo
+        .branches
+        .iter()
+        .map(|branch| branch.name.clone())
+        .collect();
+    let mut stack_info = if branch_to_parent.is_empty() {
+        StackInfo::empty()
+    } else {
+        build_stacks_from_parents(&branch_names, &branch_to_parent)
+    };
+    stack_info.detection_status = status;
+    stack_info
 }
 
 fn stack_cache_signature(repo: &RepoState) -> String {
@@ -161,6 +206,7 @@ fn load_stack_cache(root: &Path, signature: &str) -> Option<StackInfo> {
         standalone: entry.stack_info.standalone,
         branch_to_parent: entry.stack_info.branch_to_parent,
         stale_branches: HashSet::new(),
+        detection_status: StackDetectionStatus::Ready,
     })
 }
 
@@ -238,7 +284,9 @@ fn parse_gt_log_short_line(line: &str) -> Option<ParsedBranchLine> {
         .skip(1)
         .collect::<String>();
     let name = after_marker
-        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '│' | '|' | '─' | '┘' | '└' | '┌' | '┐' | '├' | '┤'))
+        .trim_start_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '│' | '|' | '─' | '┘' | '└' | '┌' | '┐' | '├' | '┤')
+        })
         .split_whitespace()
         .next()?
         .trim();
@@ -366,6 +414,7 @@ pub(crate) fn build_stacks_from_parents(
         standalone,
         branch_to_parent: branch_to_parent.clone(),
         stale_branches: HashSet::new(),
+        detection_status: StackDetectionStatus::Ready,
     }
 }
 
@@ -410,6 +459,7 @@ pub(crate) fn build_stacks_from_order(branches: &[String]) -> StackInfo {
         standalone,
         branch_to_parent: HashMap::new(),
         stale_branches: HashSet::new(),
+        detection_status: StackDetectionStatus::Ready,
     }
 }
 
@@ -517,6 +567,37 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{BranchInfo, RepoState};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_repo_at(root: PathBuf, branches: &[(&str, Option<&str>)]) -> RepoState {
+        RepoState {
+            root,
+            branches: branches
+                .iter()
+                .map(|(name, base_ref)| BranchInfo {
+                    name: (*name).to_string(),
+                    is_head: false,
+                    object_id: format!("{name}-oid"),
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    commit_count: 0,
+                    base_ref: base_ref.map(str::to_string),
+                })
+                .collect(),
+        }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gl-{label}-{}-{nanos}", std::process::id()))
+    }
 
     // --- strip_ansi ---
 
@@ -849,6 +930,7 @@ mod tests {
             standalone: vec![],
             branch_to_parent: HashMap::new(),
             stale_branches: HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
         let stack = info.stack_for_branch("auth-ui");
         assert!(stack.is_some());
@@ -862,8 +944,97 @@ mod tests {
             standalone: vec!["main".into()],
             branch_to_parent: HashMap::new(),
             stale_branches: HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
         };
         assert!(info.stack_for_branch("main").is_none());
+    }
+
+    #[test]
+    fn detect_stacks_reports_graphite_unavailable_and_falls_back_to_local_base_refs() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let repo_root = unique_temp_dir("stack-fallback-unavailable");
+        fs::create_dir_all(&repo_root).unwrap();
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", "/definitely-missing");
+
+        let repo = make_repo_at(
+            repo_root,
+            &[
+                ("main", Some("main")),
+                ("alpha-base", Some("main")),
+                ("alpha-top", Some("alpha-base")),
+            ],
+        );
+
+        let stack_info = detect_stacks(&repo.root, &repo, false);
+        assert_eq!(
+            stack_info.detection_status,
+            StackDetectionStatus::GraphiteUnavailable
+        );
+        assert_eq!(stack_info.stacks.len(), 1);
+        assert_eq!(
+            stack_info.stacks[0].branches,
+            vec!["alpha-base", "alpha-top"]
+        );
+
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[test]
+    fn detect_stacks_reports_parse_failure_and_falls_back_to_local_base_refs() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let repo_root = unique_temp_dir("stack-fallback-parse");
+        fs::create_dir_all(&repo_root).unwrap();
+        let fake_bin = unique_temp_dir("fake-gt-parse");
+        fs::create_dir_all(&fake_bin).unwrap();
+        let fake_gt = fake_bin.join("gt");
+        fs::write(
+            &fake_gt,
+            "#!/bin/sh\nif [ \"$1\" = \"log\" ] && [ \"$2\" = \"short\" ] && [ \"$3\" = \"--no-interactive\" ]; then\nprintf 'nonsense\\n'\nelse\nexit 1\nfi\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&fake_gt).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&fake_gt, permissions).unwrap();
+        }
+
+        let original_path = std::env::var_os("PATH");
+        let joined_path = std::env::join_paths([fake_bin.as_path()]).unwrap();
+        std::env::set_var("PATH", joined_path);
+
+        let repo = make_repo_at(
+            repo_root,
+            &[
+                ("main", Some("main")),
+                ("beta-base", Some("main")),
+                ("beta-top", Some("beta-base")),
+            ],
+        );
+
+        let stack_info = detect_stacks(&repo.root, &repo, false);
+        assert_eq!(
+            stack_info.detection_status,
+            StackDetectionStatus::GraphiteParseFailed
+        );
+        assert_eq!(stack_info.stacks.len(), 1);
+        assert_eq!(stack_info.stacks[0].branches, vec!["beta-base", "beta-top"]);
+
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 }
 
