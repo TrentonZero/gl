@@ -517,37 +517,6 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::{BranchInfo, RepoState};
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn make_branch(name: &str) -> BranchInfo {
-        BranchInfo {
-            name: name.to_string(),
-            is_head: false,
-            object_id: format!("{name}-oid"),
-            upstream: None,
-            ahead: 0,
-            behind: 0,
-            commit_count: 0,
-            base_ref: Some("main".to_string()),
-        }
-    }
-
-    fn make_repo(root: PathBuf, branch_names: &[&str]) -> RepoState {
-        RepoState {
-            root,
-            branches: branch_names.iter().map(|name| make_branch(name)).collect(),
-        }
-    }
-
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("gl-{label}-{}-{nanos}", std::process::id()))
-    }
 
     // --- strip_ansi ---
 
