@@ -13,8 +13,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use git::{
-    load_branch_diff, load_commit_counts, open_repo, refresh_repo, BranchDiff, BranchInfo,
-    RepoState,
+    load_branch_diff, load_commit_counts, load_working_tree_status, open_repo, refresh_repo,
+    BranchDiff, BranchInfo, DetailKind, RepoState,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
@@ -80,6 +80,7 @@ struct App {
     display_entries: Vec<BranchEntry>,
     selected_index: usize,
     show_stack_view: bool,
+    detail_kind: Option<DetailKind>,
     branch_diff: Option<BranchDiff>,
     highlighted_diff: Option<Vec<Line<'static>>>,
     diff_scroll: usize,
@@ -117,6 +118,7 @@ impl App {
             display_entries,
             selected_index: 0,
             show_stack_view: false,
+            detail_kind: None,
             branch_diff: None,
             highlighted_diff: None,
             diff_scroll: 0,
@@ -188,6 +190,7 @@ impl App {
                         &self.display_entries,
                         self.selected_index,
                         self.current_stack_view().as_ref(),
+                        self.detail_kind,
                         self.branch_diff.as_ref(),
                         self.highlighted_diff.as_deref(),
                         self.diff_scroll,
@@ -277,7 +280,11 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-10)
             }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.open_selected_status()?
+            }
             KeyCode::Char('s') => self.toggle_stack_view(),
+            KeyCode::Char('S') => self.open_selected_status()?,
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
             KeyCode::Enter => self.open_selected_branch()?,
             _ => {}
@@ -462,6 +469,7 @@ impl App {
                 self.branch_diff = Some(preloaded.diff);
             }
         }
+        self.detail_kind = Some(DetailKind::BranchDiff);
         self.show_stack_view = false;
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
@@ -470,7 +478,38 @@ impl App {
         Ok(())
     }
 
+    fn open_selected_status(&mut self) -> Result<()> {
+        let Some(selected_branch) = self.selected_branch_name() else {
+            return Ok(());
+        };
+        let Some(branch) = self
+            .repo
+            .branches
+            .iter()
+            .find(|branch| branch.name == selected_branch)
+        else {
+            return Ok(());
+        };
+        if !branch.is_head {
+            return Ok(());
+        }
+
+        let diff = load_working_tree_status(&self.repo.root, &branch.name)?;
+        let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
+        self.detail_kind = Some(DetailKind::Status);
+        self.branch_diff = Some(diff);
+        self.highlighted_diff = Some(highlighted_diff);
+        self.show_stack_view = false;
+        self.diff_scroll = 0;
+        self.focus = FocusedPane::Diff;
+        self.search_input.clear();
+        self.search_matches.clear();
+        self.search_cursor = 0;
+        Ok(())
+    }
+
     fn close_detail(&mut self) {
+        self.detail_kind = None;
         self.branch_diff = None;
         self.highlighted_diff = None;
         self.diff_scroll = 0;
@@ -507,18 +546,37 @@ impl App {
             self.selected_index = *selectable.last().unwrap();
         }
 
-        if let Some(current_diff) = &self.branch_diff {
-            if let Some(branch) =
-                branch_for_diff(&self.repo, &self.stack_info, &current_diff.branch_name)
-            {
-                let preloaded = preload_branch_diff(&self.repo.root, branch)?;
-                self.preloaded_diffs
-                    .insert(current_diff.branch_name.clone(), preloaded.clone());
-                self.highlighted_diff = Some(preloaded.highlighted_diff);
-                self.branch_diff = Some(preloaded.diff);
-                self.refresh_search_matches();
-            } else {
-                self.close_detail();
+        if let Some(detail_kind) = self.detail_kind {
+            match detail_kind {
+                DetailKind::BranchDiff => {
+                    if let Some(current_diff) = &self.branch_diff {
+                        if let Some(branch) =
+                            branch_for_diff(&self.repo, &self.stack_info, &current_diff.branch_name)
+                        {
+                            let preloaded = preload_branch_diff(&self.repo.root, branch)?;
+                            self.preloaded_diffs
+                                .insert(current_diff.branch_name.clone(), preloaded.clone());
+                            self.highlighted_diff = Some(preloaded.highlighted_diff);
+                            self.branch_diff = Some(preloaded.diff);
+                            self.refresh_search_matches();
+                        } else {
+                            self.close_detail();
+                        }
+                    }
+                }
+                DetailKind::Status => {
+                    if let Some(head_branch) =
+                        self.repo.branches.iter().find(|branch| branch.is_head)
+                    {
+                        let diff = load_working_tree_status(&self.repo.root, &head_branch.name)?;
+                        let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
+                        self.branch_diff = Some(diff);
+                        self.highlighted_diff = Some(highlighted_diff);
+                        self.refresh_search_matches();
+                    } else {
+                        self.close_detail();
+                    }
+                }
             }
         }
 
@@ -888,7 +946,11 @@ fn build_stack_view(
         .collect();
     let selected_index = stack.branches.iter().position(|name| name == branch_name)?;
     let diff_branch = branch_for_diff(repo, stack_info, branch_name)?;
-    let parent_branch = (selected_index > 0).then(|| stack.branches[selected_index - 1].clone());
+    let parent_branch = if selected_index > 0 {
+        Some(stack.branches[selected_index - 1].clone())
+    } else {
+        diff_branch.base_ref.clone()
+    };
     let child_branch = stack.branches.get(selected_index + 1).cloned();
 
     let branches = stack
@@ -1385,13 +1447,19 @@ mod tests {
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
+        let mut repo = make_repo_at(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            &["a1", "a2", "b1", "main"],
+        );
+        repo.branches[3].is_head = true;
         App {
             config: AppConfig::default(),
-            repo: make_repo(&["a1", "a2", "b1", "main"]),
+            repo,
             stack_info: empty_stacks(),
             display_entries: entries,
             selected_index: 0,
             show_stack_view: false,
+            detail_kind: None,
             branch_diff: None,
             highlighted_diff: None,
             diff_scroll: 0,
@@ -1517,6 +1585,28 @@ mod tests {
         assert!(view.branches[1].is_selected);
         assert!(view.branches[1].is_head);
         assert_eq!(view.branches[1].ahead, 2);
+    }
+
+    #[test]
+    fn build_stack_view_shows_trunk_as_parent_for_bottom_branch() {
+        let repo = make_repo(&["auth-base", "auth-ui", "main"]);
+        let stacks = StackInfo {
+            stacks: vec![Stack {
+                name: "auth stack".into(),
+                branches: vec!["auth-base".into(), "auth-ui".into()],
+            }],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::from([
+                ("auth-base".into(), "main".into()),
+                ("auth-ui".into(), "auth-base".into()),
+            ]),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+
+        let view = build_stack_view(&repo, &stacks, "auth-base").unwrap();
+        assert_eq!(view.parent_branch.as_deref(), Some("main"));
+        assert_eq!(view.child_branch.as_deref(), Some("auth-ui"));
     }
 
     #[test]
@@ -1672,5 +1762,36 @@ mod tests {
                 .map(|line| line.spans[0].content.as_ref()),
             Some("preloaded")
         );
+        assert_eq!(app.detail_kind, Some(DetailKind::BranchDiff));
+    }
+
+    #[test]
+    fn open_selected_status_only_opens_for_head_branch() {
+        let mut app = make_test_app(make_test_entries());
+        app.selected_index = 1;
+        app.open_selected_status().unwrap();
+        assert!(app.branch_diff.is_none());
+
+        app.selected_index = 6;
+        app.open_selected_status().unwrap();
+        assert_eq!(app.detail_kind, Some(DetailKind::Status));
+        assert_eq!(
+            app.branch_diff
+                .as_ref()
+                .map(|diff| diff.base_ref.as_deref()),
+            Some(Some("working tree"))
+        );
+    }
+
+    #[test]
+    fn shift_s_opens_status_instead_of_toggling_stack_view() {
+        let mut app = make_test_app(make_test_entries());
+        app.selected_index = 6;
+
+        app.handle_branch_list_keys(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SHIFT))
+            .unwrap();
+
+        assert_eq!(app.detail_kind, Some(DetailKind::Status));
+        assert!(!app.show_stack_view);
     }
 }

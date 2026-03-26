@@ -22,6 +22,10 @@ Today the app is focused on one core workflow:
   - file-header jump navigation
   - in-diff search with `n` and `N`
   - background preload of branch diffs and highlighted output after first paint
+- Status view for the checked-out branch with:
+  - working tree summary counts for staged, unstaged, and untracked files
+  - staged and unstaged combined diffs in the existing review pane
+  - untracked-file listing in the same jumpable file roster
 - Stack view with:
   - selected-branch parent/child/base summary
   - ordered stack branch roster with stale and tracking indicators
@@ -31,7 +35,7 @@ Today the app is focused on one core workflow:
 
 ## What Is Not Implemented Yet
 
-The repository still contains broader design docs for worktrees, status view, graph view, side-by-side diff, command mode, and richer config. Those are not implemented in the current binary.
+The repository still contains broader design docs for worktrees, graph view, side-by-side diff, command mode, and richer config. Those are not implemented in the current binary.
 
 ## Prerequisites
 
@@ -79,6 +83,7 @@ Branch list:
 - `gg` / `G`: jump to first or last branch
 - `Ctrl-d` / `Ctrl-u`: move faster through the list
 - `Enter`: open selected branch diff
+- `S`: open the checked-out branch's working tree status
 - `s`: open or close the selected branch's stack view
 - `R`: refresh repository data
 - `?`: show help
