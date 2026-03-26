@@ -16,6 +16,29 @@ pub enum FocusedPane {
     Diff,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackView {
+    pub title: String,
+    pub selected_branch: String,
+    pub parent_branch: Option<String>,
+    pub child_branch: Option<String>,
+    pub base_ref: Option<String>,
+    pub stale: bool,
+    pub branches: Vec<StackViewBranch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackViewBranch {
+    pub name: String,
+    pub is_selected: bool,
+    pub is_head: bool,
+    pub commit_count: usize,
+    pub ahead: usize,
+    pub behind: usize,
+    pub has_upstream: bool,
+    pub stale: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum BranchEntry {
     Header {
@@ -52,6 +75,7 @@ pub fn draw(
     repo: &RepoState,
     display_entries: &[BranchEntry],
     selected_index: usize,
+    stack_view: Option<&StackView>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
@@ -85,6 +109,7 @@ pub fn draw(
         draw_help_bar(
             frame,
             areas[2],
+            stack_view.is_some(),
             branch_diff.is_some(),
             focus,
             search,
@@ -97,6 +122,7 @@ pub fn draw(
         areas[1],
         display_entries,
         selected_index,
+        stack_view,
         branch_diff,
         highlighted_diff,
         diff_scroll,
@@ -138,16 +164,18 @@ fn draw_status_bar(frame: &mut Frame<'_>, area: Rect, repo: &RepoState, detail: 
 fn draw_help_bar(
     frame: &mut Frame<'_>,
     area: Rect,
+    stack_view_open: bool,
     detail: bool,
     focus: FocusedPane,
     search: Option<&str>,
     notice: Option<&str>,
 ) {
-    let line = help_bar_line(detail, focus, search, notice);
+    let line = help_bar_line(stack_view_open, detail, focus, search, notice);
     frame.render_widget(Paragraph::new(line), area);
 }
 
 fn help_bar_line(
+    stack_view_open: bool,
     detail: bool,
     focus: FocusedPane,
     search: Option<&str>,
@@ -162,8 +190,10 @@ fn help_bar_line(
                 "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  / search  n/N next  Esc list"
             }
         }
+    } else if stack_view_open {
+        "j/k move  J/K stacks  Enter open diff  s stack  Esc close  R refresh  q quit"
     } else {
-        "j/k move  J/K stacks  Enter open  R refresh  q quit  ? help"
+        "j/k move  J/K stacks  Enter open  s stack  R refresh  q quit  ? help"
     };
 
     let mut line = Line::from(Span::styled(hints, Style::default().fg(Color::Gray)));
@@ -191,6 +221,7 @@ fn draw_body(
     area: Rect,
     display_entries: &[BranchEntry],
     selected_index: usize,
+    stack_view: Option<&StackView>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
@@ -218,7 +249,18 @@ fn draw_body(
                 focus == FocusedPane::Diff,
             );
         }
-        None => draw_branch_list(frame, area, display_entries, selected_index, true),
+        None => {
+            if let Some(stack_view) = stack_view {
+                let panes = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(34), Constraint::Min(1)])
+                    .split(area);
+                draw_branch_list(frame, panes[0], display_entries, selected_index, true);
+                draw_stack_view(frame, panes[1], stack_view);
+            } else {
+                draw_branch_list(frame, area, display_entries, selected_index, true);
+            }
+        }
     }
 }
 
@@ -423,6 +465,131 @@ fn draw_diff(
     );
 }
 
+fn draw_stack_view(frame: &mut Frame<'_>, area: Rect, stack_view: &StackView) {
+    let block = Block::default()
+        .title(stack_view.title.clone())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+
+    frame.render_widget(
+        Paragraph::new(stack_view_lines(stack_view))
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn stack_view_lines(stack_view: &StackView) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Selected: ",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                stack_view.selected_branch.clone(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(""),
+        kv_line(
+            "Parent",
+            stack_view.parent_branch.as_deref().unwrap_or("none"),
+        ),
+        kv_line(
+            "Child",
+            stack_view.child_branch.as_deref().unwrap_or("none"),
+        ),
+        kv_line(
+            "Diff base",
+            stack_view.base_ref.as_deref().unwrap_or("none"),
+        ),
+        kv_line("Stale", if stack_view.stale { "yes" } else { "no" }),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Stack Branches",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    for branch in &stack_view.branches {
+        lines.push(stack_branch_line(branch));
+    }
+
+    lines
+}
+
+fn kv_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<9}"),
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(Color::White)),
+    ])
+}
+
+fn stack_branch_line(branch: &StackViewBranch) -> Line<'static> {
+    let mut spans = Vec::new();
+    if branch.is_selected {
+        spans.push(Span::styled("▶ ", Style::default().fg(Color::Blue)));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+
+    if branch.stale {
+        spans.push(Span::styled("⚠ ", Style::default().fg(Color::Yellow)));
+    }
+
+    if branch.is_head {
+        spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
+    } else if !branch.stale {
+        spans.push(Span::raw("  "));
+    }
+
+    spans.push(Span::styled(
+        branch.name.clone(),
+        if branch.is_selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        },
+    ));
+
+    if branch.commit_count > 0 {
+        spans.push(Span::styled(
+            format!("  {}c", branch.commit_count),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    if branch.ahead == 0 && branch.behind == 0 && branch.has_upstream {
+        spans.push(Span::styled("  ✓", Style::default().fg(Color::Green)));
+    } else {
+        if branch.ahead > 0 {
+            spans.push(Span::styled(
+                format!("  ↑{}", branch.ahead),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        if branch.behind > 0 {
+            spans.push(Span::styled(
+                format!("  ↓{}", branch.behind),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    }
+
+    Line::from(spans)
+}
+
 fn visible_highlighted_lines(
     lines: &[Line<'static>],
     diff_scroll: usize,
@@ -506,8 +673,9 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             )),
             Line::from(""),
             Line::from("Global: q quit, ? toggle help, R refresh"),
-            Line::from("Branches: j/k move, J/K jump stacks, gg/G ends"),
+            Line::from("Branches: j/k move, J/K jump stacks, gg/G ends, s stack"),
             Line::from("          Ctrl-d/u half-page, Enter open branch"),
+            Line::from("Stack view: Esc back to list, Enter open selected diff"),
             Line::from("Detail: Esc back to list, Tab focus diff/list"),
             Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G"),
             Line::from("Diff files: J/K jump to next or previous file"),
@@ -762,6 +930,7 @@ mod tests {
     fn help_bar_shows_non_blocking_notice() {
         let line = help_bar_line(
             false,
+            false,
             FocusedPane::BranchList,
             None,
             Some("Graphite unavailable; showing inferred local branch relationships."),
@@ -773,5 +942,62 @@ mod tests {
             .collect();
         assert!(text.contains("R refresh"));
         assert!(text.contains("Graphite unavailable"));
+    }
+
+    #[test]
+    fn help_bar_shows_stack_view_hints() {
+        let line = help_bar_line(true, false, FocusedPane::BranchList, None, None);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("Enter open diff"));
+        assert!(text.contains("Esc close"));
+    }
+
+    #[test]
+    fn stack_view_lines_include_selected_relationships() {
+        let stack_view = StackView {
+            title: "auth stack".into(),
+            selected_branch: "auth-ui".into(),
+            parent_branch: Some("auth-base".into()),
+            child_branch: None,
+            base_ref: Some("auth-base".into()),
+            stale: true,
+            branches: vec![
+                StackViewBranch {
+                    name: "auth-base".into(),
+                    is_selected: false,
+                    is_head: false,
+                    commit_count: 2,
+                    ahead: 0,
+                    behind: 0,
+                    has_upstream: true,
+                    stale: false,
+                },
+                StackViewBranch {
+                    name: "auth-ui".into(),
+                    is_selected: true,
+                    is_head: true,
+                    commit_count: 3,
+                    ahead: 1,
+                    behind: 0,
+                    has_upstream: true,
+                    stale: true,
+                },
+            ],
+        };
+
+        let text: String = stack_view_lines(&stack_view)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .collect();
+        assert!(text.contains("Selected: auth-ui"));
+        assert!(text.contains("Parent   auth-base"));
+        assert!(text.contains("Stale    yes"));
+        assert!(text.contains("▶ "));
+        assert!(text.contains("⚠ "));
     }
 }
