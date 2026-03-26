@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-const STACK_CACHE_VERSION: u32 = 1;
+const STACK_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedBranchLine {
@@ -333,7 +333,16 @@ fn parse_gt_log_short(output: &str) -> Vec<ParsedBranchLine> {
 
 fn parse_gt_log_short_line(line: &str) -> Option<ParsedBranchLine> {
     let trimmed_end = line.trim_end();
-    let name = trimmed_end.split_whitespace().last()?.trim();
+    let marker_index = trimmed_end.find(is_branch_marker)?;
+    let after_marker = trimmed_end[marker_index..]
+        .chars()
+        .skip(1)
+        .collect::<String>();
+    let name = after_marker
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '│' | '|' | '─' | '┘' | '└' | '┌' | '┐' | '├' | '┤'))
+        .split_whitespace()
+        .next()?
+        .trim();
     if name.is_empty()
         || name
             .chars()
@@ -342,7 +351,6 @@ fn parse_gt_log_short_line(line: &str) -> Option<ParsedBranchLine> {
         return None;
     }
 
-    let marker_index = trimmed_end.find(is_branch_marker)?;
     let depth = trimmed_end[..marker_index]
         .chars()
         .filter(|ch| matches!(ch, '│' | '|'))
@@ -746,6 +754,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_branch_names_ignores_parenthesized_status_suffix() {
+        let output = "\
+◉    perf-defer-graphite-startup
+│ ◯  plan-docs-update
+│ ◯  stack-view
+│ ◯  stack-model-cleanup (needs restack)
+◯─┘  main
+";
+        let names = parse_branch_names(output);
+        assert_eq!(
+            names,
+            vec![
+                "perf-defer-graphite-startup",
+                "plan-docs-update",
+                "stack-view",
+                "stack-model-cleanup",
+                "main",
+            ]
+        );
+    }
+
+    #[test]
     fn parse_gt_log_short_tracks_depth() {
         let output = "\
 ◉    tip
@@ -994,6 +1024,43 @@ mod tests {
         assert_eq!(info.standalone, cached.standalone);
         assert_eq!(info.branch_to_parent, cached.branch_to_parent);
         assert!(info.stale_branches.is_empty());
+
+        std::env::remove_var("XDG_CACHE_HOME");
+    }
+
+    #[test]
+    fn detect_stacks_cached_ignores_stale_cache_version() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let cache_home = unique_temp_dir("cache-stale-version");
+        std::env::set_var("XDG_CACHE_HOME", &cache_home);
+
+        let repo_root = unique_temp_dir("repo-stale-version");
+        let repo = make_repo(repo_root.clone(), &["feature-top", "feature-base", "main"]);
+        let cache_path = stack_cache_path(&repo_root).unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let stale_entry = r#"
+version = 1
+signature = "01913b40d30c8c35"
+
+[stack_info]
+standalone = ["main"]
+
+[[stack_info.stacks]]
+name = "restack) stack"
+branches = ["restack)", "feature-top"]
+
+[stack_info.branch_to_parent]
+"restack)" = "main"
+feature-top = "restack)"
+"#;
+        fs::write(cache_path, stale_entry.trim_start()).unwrap();
+
+        let info = detect_stacks_cached(&repo_root, &repo);
+        assert!(info.stacks.is_empty());
+        assert!(info.standalone.is_empty());
+        assert!(info.branch_to_parent.is_empty());
 
         std::env::remove_var("XDG_CACHE_HOME");
     }
