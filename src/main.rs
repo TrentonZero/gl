@@ -19,6 +19,7 @@ use git::{
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
 use std::{
+    collections::{HashMap, HashSet},
     env, io, mem,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
@@ -60,6 +61,18 @@ struct CommitCountLoadResult {
     commit_counts: Vec<(String, usize)>,
 }
 
+#[derive(Clone)]
+struct PreloadedBranchDiff {
+    diff: BranchDiff,
+    highlighted_diff: Vec<Line<'static>>,
+}
+
+struct DiffPreloadResult {
+    request_id: usize,
+    branch_name: String,
+    preloaded: Result<PreloadedBranchDiff, String>,
+}
+
 struct App {
     config: AppConfig,
     repo: RepoState,
@@ -76,13 +89,19 @@ struct App {
     search_input: String,
     search_matches: Vec<usize>,
     search_cursor: usize,
-    syntax_highlighter: Option<SyntaxHighlighter>,
     stack_result_tx: Sender<StackLoadResult>,
     stack_result_rx: Receiver<StackLoadResult>,
     stack_request_id: usize,
     commit_count_result_tx: Sender<CommitCountLoadResult>,
     commit_count_result_rx: Receiver<CommitCountLoadResult>,
     commit_count_request_id: usize,
+    diff_preload_result_tx: Sender<DiffPreloadResult>,
+    diff_preload_result_rx: Receiver<DiffPreloadResult>,
+    diff_preload_request_id: usize,
+    diff_preload_started: bool,
+    preloaded_diffs: HashMap<String, PreloadedBranchDiff>,
+    diff_preload_failures: HashMap<String, String>,
+    pending_diff_preloads: HashSet<String>,
 }
 
 impl App {
@@ -90,6 +109,7 @@ impl App {
         let display_entries = build_display_entries(&repo, &stack_info);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
+        let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
         let mut app = Self {
             config,
             repo,
@@ -106,13 +126,19 @@ impl App {
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
-            syntax_highlighter: None,
             stack_result_tx,
             stack_result_rx,
             stack_request_id: 0,
             commit_count_result_tx,
             commit_count_result_rx,
             commit_count_request_id: 0,
+            diff_preload_result_tx,
+            diff_preload_result_rx,
+            diff_preload_request_id: 0,
+            diff_preload_started: false,
+            preloaded_diffs: HashMap::new(),
+            diff_preload_failures: HashMap::new(),
+            pending_diff_preloads: HashSet::new(),
         };
         app.reload_stack_decorations_async();
         app.reload_commit_counts_async();
@@ -142,6 +168,9 @@ impl App {
                 needs_redraw = true;
             }
             if self.apply_pending_commit_count_updates() {
+                needs_redraw = true;
+            }
+            if self.apply_pending_diff_preloads() {
                 needs_redraw = true;
             }
 
@@ -175,6 +204,7 @@ impl App {
                 if !first_draw_logged {
                     perf::log("first frame rendered");
                     first_draw_logged = true;
+                    self.start_diff_preload_async();
                 }
                 needs_redraw = false;
             }
@@ -410,9 +440,28 @@ impl App {
             return Ok(());
         };
 
-        let diff = load_branch_diff(&self.repo.root, &branch)?;
-        self.highlighted_diff = Some(self.syntax_highlighter().highlight_diff(&diff)?);
-        self.branch_diff = Some(diff);
+        let branch_name = branch.name.clone();
+        let preloaded = self
+            .preloaded_diffs
+            .get(&branch_name)
+            .cloned()
+            .or_else(|| self.wait_for_preloaded_diff(&branch_name));
+        if let Some(preloaded) = preloaded {
+            self.highlighted_diff = Some(preloaded.highlighted_diff);
+            self.branch_diff = Some(preloaded.diff);
+        } else {
+            self.start_single_diff_preload(branch.clone());
+            if let Some(preloaded) = self.wait_for_preloaded_diff(&branch_name) {
+                self.highlighted_diff = Some(preloaded.highlighted_diff);
+                self.branch_diff = Some(preloaded.diff);
+            } else {
+                let preloaded = preload_branch_diff(&self.repo.root, branch)?;
+                self.preloaded_diffs
+                    .insert(branch_name.clone(), preloaded.clone());
+                self.highlighted_diff = Some(preloaded.highlighted_diff);
+                self.branch_diff = Some(preloaded.diff);
+            }
+        }
         self.show_stack_view = false;
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
@@ -435,12 +484,14 @@ impl App {
         let _timer = perf::ScopeTimer::new("App::refresh_repo");
         self.repo = refresh_repo(&self.repo.root)?;
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
+        self.reset_diff_preload_state();
         self.rebuild_display_entries_preserve_selection(None);
         if self.show_stack_view && self.current_stack_view().is_none() {
             self.show_stack_view = false;
         }
         self.reload_stack_decorations_async();
         self.reload_commit_counts_async();
+        self.start_diff_preload_async();
 
         // Clamp selected_index to a valid selectable entry
         let selectable: Vec<usize> = self
@@ -460,9 +511,11 @@ impl App {
             if let Some(branch) =
                 branch_for_diff(&self.repo, &self.stack_info, &current_diff.branch_name)
             {
-                let diff = load_branch_diff(&self.repo.root, &branch)?;
-                self.highlighted_diff = Some(self.syntax_highlighter().highlight_diff(&diff)?);
-                self.branch_diff = Some(diff);
+                let preloaded = preload_branch_diff(&self.repo.root, branch)?;
+                self.preloaded_diffs
+                    .insert(current_diff.branch_name.clone(), preloaded.clone());
+                self.highlighted_diff = Some(preloaded.highlighted_diff);
+                self.branch_diff = Some(preloaded.diff);
                 self.refresh_search_matches();
             } else {
                 self.close_detail();
@@ -507,6 +560,50 @@ impl App {
         });
     }
 
+    fn start_diff_preload_async(&mut self) {
+        if self.diff_preload_started {
+            return;
+        }
+
+        self.diff_preload_started = true;
+        self.diff_preload_request_id += 1;
+        let request_id = self.diff_preload_request_id;
+        for branch in diff_preload_targets(&self.repo, &self.stack_info, &self.display_entries) {
+            self.start_single_diff_preload_with_request(branch, request_id);
+        }
+    }
+
+    fn start_single_diff_preload(&mut self, branch: BranchInfo) {
+        if !self.diff_preload_started {
+            self.diff_preload_started = true;
+            self.diff_preload_request_id += 1;
+        }
+        let request_id = self.diff_preload_request_id;
+        self.start_single_diff_preload_with_request(branch, request_id);
+    }
+
+    fn start_single_diff_preload_with_request(&mut self, branch: BranchInfo, request_id: usize) {
+        if self.preloaded_diffs.contains_key(&branch.name)
+            || self.pending_diff_preloads.contains(&branch.name)
+        {
+            return;
+        }
+
+        let root = self.repo.root.clone();
+        let branch_name = branch.name.clone();
+        let tx = self.diff_preload_result_tx.clone();
+        self.pending_diff_preloads.insert(branch_name.clone());
+        thread::spawn(move || {
+            let _timer = perf::ScopeTimer::new(format!("diff_preload branch={}", branch_name));
+            let preloaded = preload_branch_diff(&root, branch).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(DiffPreloadResult {
+                request_id,
+                branch_name,
+                preloaded,
+            });
+        });
+    }
+
     fn apply_pending_stack_updates(&mut self) -> bool {
         let mut changed = false;
         while let Ok(result) = self.stack_result_rx.try_recv() {
@@ -520,6 +617,68 @@ impl App {
             changed = true;
         }
         changed
+    }
+
+    fn apply_pending_diff_preloads(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.diff_preload_result_rx.try_recv() {
+            if result.request_id != self.diff_preload_request_id {
+                continue;
+            }
+
+            self.pending_diff_preloads.remove(&result.branch_name);
+            match result.preloaded {
+                Ok(preloaded) => {
+                    self.preloaded_diffs.insert(result.branch_name, preloaded);
+                }
+                Err(message) => {
+                    self.diff_preload_failures
+                        .insert(result.branch_name, message);
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn wait_for_preloaded_diff(&mut self, branch_name: &str) -> Option<PreloadedBranchDiff> {
+        if let Some(preloaded) = self.preloaded_diffs.get(branch_name).cloned() {
+            return Some(preloaded);
+        }
+        if !self.pending_diff_preloads.contains(branch_name) {
+            return None;
+        }
+
+        while self.pending_diff_preloads.contains(branch_name) {
+            let Ok(result) = self.diff_preload_result_rx.recv() else {
+                break;
+            };
+            if result.request_id != self.diff_preload_request_id {
+                continue;
+            }
+
+            self.pending_diff_preloads.remove(&result.branch_name);
+            match result.preloaded {
+                Ok(preloaded) => {
+                    self.preloaded_diffs
+                        .insert(result.branch_name.clone(), preloaded.clone());
+                }
+                Err(message) => {
+                    self.diff_preload_failures
+                        .insert(result.branch_name.clone(), message);
+                }
+            }
+        }
+
+        self.preloaded_diffs.get(branch_name).cloned()
+    }
+
+    fn reset_diff_preload_state(&mut self) {
+        self.diff_preload_started = false;
+        self.diff_preload_request_id += 1;
+        self.preloaded_diffs.clear();
+        self.diff_preload_failures.clear();
+        self.pending_diff_preloads.clear();
     }
 
     fn apply_pending_commit_count_updates(&mut self) -> bool {
@@ -547,11 +706,6 @@ impl App {
             }
         }
         changed
-    }
-
-    fn syntax_highlighter(&mut self) -> &mut SyntaxHighlighter {
-        self.syntax_highlighter
-            .get_or_insert_with(SyntaxHighlighter::new)
     }
 
     fn toggle_stack_view(&mut self) {
@@ -763,6 +917,39 @@ fn build_stack_view(
         base_ref: diff_branch.base_ref,
         stale: stack_info.is_stale(branch_name),
         branches,
+    })
+}
+
+fn diff_preload_targets(
+    repo: &RepoState,
+    stack_info: &StackInfo,
+    display_entries: &[BranchEntry],
+) -> Vec<BranchInfo> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    for branch_name in display_entries
+        .iter()
+        .filter(|entry| !entry.is_header())
+        .map(BranchEntry::branch_name)
+    {
+        let Some(branch) = branch_for_diff(repo, stack_info, branch_name) else {
+            continue;
+        };
+        if seen.insert(branch.name.clone()) {
+            targets.push(branch);
+        }
+    }
+
+    targets
+}
+
+fn preload_branch_diff(root: &std::path::Path, branch: BranchInfo) -> Result<PreloadedBranchDiff> {
+    let diff = load_branch_diff(root, &branch)?;
+    let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
+    Ok(PreloadedBranchDiff {
+        diff,
+        highlighted_diff,
     })
 }
 
@@ -1197,6 +1384,7 @@ mod tests {
     fn make_test_app(entries: Vec<BranchEntry>) -> App {
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
+        let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
         App {
             config: AppConfig::default(),
             repo: make_repo(&["a1", "a2", "b1", "main"]),
@@ -1213,13 +1401,19 @@ mod tests {
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
-            syntax_highlighter: None,
             stack_result_tx,
             stack_result_rx,
             stack_request_id: 0,
             commit_count_result_tx,
             commit_count_result_rx,
             commit_count_request_id: 0,
+            diff_preload_result_tx,
+            diff_preload_result_rx,
+            diff_preload_request_id: 0,
+            diff_preload_started: false,
+            preloaded_diffs: HashMap::new(),
+            diff_preload_failures: HashMap::new(),
+            pending_diff_preloads: std::collections::HashSet::new(),
         }
     }
 
@@ -1393,5 +1587,90 @@ mod tests {
         }
 
         assert!(!app.show_stack_view);
+    }
+
+    #[test]
+    fn diff_preload_targets_follow_visible_branch_order() {
+        let repo = make_repo(&["base", "top", "main"]);
+        let stacks = StackInfo {
+            stacks: vec![Stack {
+                name: "stack".into(),
+                branches: vec!["base".into(), "top".into()],
+            }],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::from([
+                ("base".into(), "main".into()),
+                ("top".into(), "base".into()),
+            ]),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let entries = build_display_entries(&repo, &stacks);
+
+        let targets = diff_preload_targets(&repo, &stacks, &entries);
+        let names: Vec<_> = targets.iter().map(|branch| branch.name.as_str()).collect();
+        assert_eq!(names, vec!["base", "top", "main"]);
+        assert_eq!(targets[1].base_ref.as_deref(), Some("base"));
+    }
+
+    #[test]
+    fn wait_for_preloaded_diff_promotes_completed_async_result_into_cache() {
+        let mut app = make_test_app(make_test_entries());
+        app.diff_preload_request_id = 1;
+        app.pending_diff_preloads.insert("a1".into());
+        app.diff_preload_result_tx
+            .send(DiffPreloadResult {
+                request_id: 1,
+                branch_name: "a1".into(),
+                preloaded: Ok(PreloadedBranchDiff {
+                    diff: BranchDiff {
+                        branch_name: "a1".into(),
+                        base_ref: Some("main".into()),
+                        lines: vec![],
+                        file_positions: vec![],
+                    },
+                    highlighted_diff: vec![Line::from("cached")],
+                }),
+            })
+            .unwrap();
+
+        let preloaded = app.wait_for_preloaded_diff("a1").unwrap();
+        assert_eq!(preloaded.diff.branch_name, "a1");
+        assert!(app.preloaded_diffs.contains_key("a1"));
+        assert!(!app.pending_diff_preloads.contains("a1"));
+    }
+
+    #[test]
+    fn open_selected_branch_uses_preloaded_diff_without_git_roundtrip() {
+        let mut app = make_test_app(make_test_entries());
+        app.selected_index = 1;
+        app.preloaded_diffs.insert(
+            "a1".into(),
+            PreloadedBranchDiff {
+                diff: BranchDiff {
+                    branch_name: "a1".into(),
+                    base_ref: Some("main".into()),
+                    lines: vec![],
+                    file_positions: vec![],
+                },
+                highlighted_diff: vec![Line::from("preloaded")],
+            },
+        );
+
+        app.open_selected_branch().unwrap();
+
+        assert_eq!(
+            app.branch_diff
+                .as_ref()
+                .map(|diff| diff.branch_name.as_str()),
+            Some("a1")
+        );
+        assert_eq!(
+            app.highlighted_diff
+                .as_ref()
+                .and_then(|lines| lines.first())
+                .map(|line| line.spans[0].content.as_ref()),
+            Some("preloaded")
+        );
     }
 }

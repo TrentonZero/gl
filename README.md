@@ -21,6 +21,7 @@ Today the app is focused on one core workflow:
   - syntax-highlighted diff rendering via `syntect`
   - file-header jump navigation
   - in-diff search with `n` and `N`
+  - background preload of branch diffs and highlighted output after first paint
 - Stack view with:
   - selected-branch parent/child/base summary
   - ordered stack branch roster with stale and tracking indicators
