@@ -6,6 +6,148 @@ This plan breaks the GL build into phases. Each phase produces a working, testab
 
 ---
 
+## Current Implementation Status
+
+### Phase 1: Skeleton and Branch List
+
+**Status:** Complete
+
+Delivered:
+
+- Cargo project and terminal app shell
+- alternate screen and raw mode
+- branch list with current-branch marker
+- ahead/behind display
+- manual refresh
+- help overlay
+- optional chrome config
+
+Notes:
+
+- The implementation uses the `git` CLI for repository inspection rather than `gix`.
+
+### Phase 2: Branch Detail View (Diff)
+
+**Status:** Complete
+
+Delivered:
+
+- `Enter` opens a branch detail view
+- branch diff is computed from merge-base to branch tip
+- left branch pane plus right diff pane layout
+- diff scrolling and file-header jumps
+- in-diff search with `/`, `n`, and `N`
+
+Notes:
+
+- The current diff is always unified.
+- The diff base can be overridden by Graphite parent relationships when stack data exists.
+
+### Phase 3: Syntax Highlighting
+
+**Status:** Complete
+
+Delivered:
+
+- `syntect` integration
+- per-file syntax detection
+- syntax-colored diff content with add/delete tinting
+- in-memory highlighted file-block caching
+
+### Phase 4: Graphite Stack Integration
+
+**Status:** Complete
+
+Delivered:
+
+- optional `gt log short` integration
+- stack grouping in the branch list
+- standalone branch section
+- stale indicators computed from branch-parent merge-base checks
+- `J` / `K` jumps between stack groups
+- cache of parsed stack structure
+- explicit non-blocking degraded-mode notice when `gt` is unavailable or stack parsing fails
+- fallback local stack inference from branch base relationships when Graphite data is unavailable
+- behavior tests covering missing-`gt` and parse-failure startup paths
+
+### Phase 5: Stack View
+
+**Status:** Not started
+
+### Phase 6: Worktree Support
+
+**Status:** Not started
+
+### Phase 7: Status View
+
+**Status:** Not started
+
+### Phase 8: Commit Breakdown
+
+**Status:** Not started
+
+### Phase 9: Graph View
+
+**Status:** Not started
+
+### Phase 10: Filesystem Watching and Background Refresh
+
+**Status:** Partial foundation only
+
+Delivered:
+
+- background worker threads for stack enrichment
+- background worker threads for commit-count loading
+
+Missing:
+
+- filesystem watching
+- automatic refresh triggers
+- background diff refresh outside manual `R`
+
+### Phase 11: Side-by-Side Diff and Diff Options
+
+**Status:** Not started
+
+### Phase 12: Command Line, Config, and Polish
+
+**Status:** Partial
+
+Delivered:
+
+- positional repo path argument
+- minimal config loading
+- decent empty/error handling for common repo inspection failures
+- profiling hooks for performance investigation
+
+Missing:
+
+- `--help`
+- `--version`
+- command mode
+- keybinding remapping
+- theme/config customization
+- broader edge-case polish
+
+## Near-Term Priorities
+
+### 1. Tighten the branch-diff experience
+
+- make diff viewport sizing dynamic instead of relying on fixed assumptions
+- improve search UX feedback when there are zero matches
+- add tests around branch base selection and diff behavior in stacked branches
+
+### 2. Add the next real view, not multiple half-views
+
+The best next feature is probably one of:
+
+- `Status View`, because it extends the current diff renderer
+- `Stack View`, because the app already has stack data and stale detection
+
+Worktree support should wait until one of those ships, otherwise the app becomes broader without getting much deeper.
+
+---
+
 ## Phase 1: Skeleton and Branch List
 
 **Goal:** A running TUI that opens a git repo and shows local branches.

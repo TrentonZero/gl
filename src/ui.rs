@@ -58,6 +58,7 @@ pub fn draw(
     show_help: bool,
     focus: FocusedPane,
     search: Option<&str>,
+    notice: Option<&str>,
 ) {
     let frame_area = frame.size();
     let areas = if config.chrome {
@@ -81,7 +82,14 @@ pub fn draw(
 
     if config.chrome {
         draw_status_bar(frame, areas[0], repo, branch_diff.is_some());
-        draw_help_bar(frame, areas[2], branch_diff.is_some(), focus, search);
+        draw_help_bar(
+            frame,
+            areas[2],
+            branch_diff.is_some(),
+            focus,
+            search,
+            notice,
+        );
     }
 
     draw_body(
@@ -133,7 +141,18 @@ fn draw_help_bar(
     detail: bool,
     focus: FocusedPane,
     search: Option<&str>,
+    notice: Option<&str>,
 ) {
+    let line = help_bar_line(detail, focus, search, notice);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn help_bar_line(
+    detail: bool,
+    focus: FocusedPane,
+    search: Option<&str>,
+    notice: Option<&str>,
+) -> Line<'static> {
     let hints = if detail {
         match focus {
             FocusedPane::BranchList => {
@@ -156,7 +175,15 @@ fn draw_help_bar(
         ));
     }
 
-    frame.render_widget(Paragraph::new(line), area);
+    if let Some(notice) = notice {
+        line.spans.push(Span::raw("  "));
+        line.spans.push(Span::styled(
+            notice.to_string(),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    line
 }
 
 fn draw_body(
@@ -729,5 +756,22 @@ mod tests {
         let line = branch_entry_item(&entry, 24);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("~"));
+    }
+
+    #[test]
+    fn help_bar_shows_non_blocking_notice() {
+        let line = help_bar_line(
+            false,
+            FocusedPane::BranchList,
+            None,
+            Some("Graphite unavailable; showing inferred local branch relationships."),
+        );
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("R refresh"));
+        assert!(text.contains("Graphite unavailable"));
     }
 }
