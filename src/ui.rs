@@ -82,6 +82,9 @@ pub fn draw(
     diff_scroll: usize,
     show_help: bool,
     focus: FocusedPane,
+    commit_list_overlay: Option<Vec<String>>,
+    commit_list_selected: Option<usize>,
+    info_overlay: Option<&[String]>,
     search: Option<&str>,
     notice: Option<&str>,
 ) {
@@ -129,6 +132,9 @@ pub fn draw(
         highlighted_diff,
         diff_scroll,
         focus,
+        commit_list_overlay.as_deref(),
+        commit_list_selected,
+        info_overlay,
     );
 
     if show_help {
@@ -189,13 +195,17 @@ fn help_bar_line(
     notice: Option<&str>,
 ) -> Line<'static> {
     let hints = if detail_kind.is_some() {
-        match focus {
-            FocusedPane::BranchList => {
+        match (detail_kind, focus) {
+            (_, FocusedPane::BranchList) => {
                 "j/k move  J/K stacks  Enter open  S status  Esc close  q quit  ? help"
             }
-            FocusedPane::Diff => {
+            (Some(DetailKind::BranchDiff), FocusedPane::Diff) => {
+                "j/k scroll  J/K files  Tab commits  Enter open commit  Backspace branch  i info  / search  Esc list"
+            }
+            (Some(DetailKind::Status), FocusedPane::Diff) => {
                 "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  / search  n/N next  Esc list"
             }
+            _ => ""
         }
     } else if stack_view_open {
         "j/k move  J/K stacks  Enter open diff  s stack  Esc close  R refresh  q quit"
@@ -234,6 +244,9 @@ fn draw_body(
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
     focus: FocusedPane,
+    commit_list_overlay: Option<&[String]>,
+    commit_list_selected: Option<usize>,
+    info_overlay: Option<&[String]>,
 ) {
     match branch_diff {
         Some(diff) => {
@@ -256,6 +269,9 @@ fn draw_body(
                 highlighted_diff,
                 diff_scroll,
                 focus == FocusedPane::Diff,
+                commit_list_overlay,
+                commit_list_selected,
+                info_overlay,
             );
         }
         None => {
@@ -445,14 +461,17 @@ fn draw_diff(
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
     focused: bool,
+    commit_list_overlay: Option<&[String]>,
+    commit_list_selected: Option<usize>,
+    info_overlay: Option<&[String]>,
 ) {
-    let title = match detail_kind {
+    let title = diff.title.clone().unwrap_or_else(|| match detail_kind {
         Some(DetailKind::Status) => format!("{} working tree", diff.branch_name),
         _ => match &diff.base_ref {
             Some(base_ref) => format!("{} vs {}", diff.branch_name, base_ref),
             None => diff.branch_name.clone(),
         },
-    };
+    });
 
     let block = Block::default()
         .title(title)
@@ -475,6 +494,61 @@ fn draw_diff(
             .scroll((0, 0))
             .wrap(Wrap { trim: false }),
         area,
+    );
+
+    if let Some(lines) = commit_list_overlay {
+        draw_commit_list_overlay(frame, area, lines, commit_list_selected.unwrap_or(0));
+    }
+
+    if let Some(lines) = info_overlay {
+        draw_info_overlay(frame, area, lines);
+    }
+}
+
+fn draw_commit_list_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    items: &[String],
+    selected_index: usize,
+) {
+    let overlay_height = (items.len() as u16 + 2)
+        .min(area.height.saturating_sub(2))
+        .max(3);
+    let overlay_width = area.width.saturating_sub(4).min(72).max(24);
+    let overlay = Rect::new(area.x + 2, area.y + 1, overlay_width, overlay_height);
+    frame.render_widget(Clear, overlay);
+
+    let list_items: Vec<ListItem<'_>> = items
+        .iter()
+        .map(|item| ListItem::new(Line::from(item.clone())))
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(selected_index.min(items.len().saturating_sub(1))));
+
+    let list = List::new(list_items)
+        .block(Block::default().title("Commits").borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(51, 70, 124))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ");
+    frame.render_stateful_widget(list, overlay, &mut state);
+}
+
+fn draw_info_overlay(frame: &mut Frame<'_>, area: Rect, lines: &[String]) {
+    let popup = centered_rect(72, (lines.len() as u16 + 2).min(area.height), area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| Line::from(line.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .block(Block::default().title("Branch Info").borders(Borders::ALL))
+        .wrap(Wrap { trim: false }),
+        popup,
     );
 }
 
@@ -689,9 +763,10 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             Line::from("Branches: j/k move, J/K jump stacks, gg/G ends, s stack"),
             Line::from("          Ctrl-d/u half-page, Enter open branch, S status"),
             Line::from("Stack view: Esc back to list, Enter open selected diff"),
-            Line::from("Detail: Esc back to list, Tab focus diff/list"),
-            Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G"),
-            Line::from("Diff files: J/K jump to next or previous file"),
+            Line::from("Branch detail: Tab commits, Enter commit diff, Backspace branch diff"),
+            Line::from("Branch detail: i info overlay, any key dismisses"),
+            Line::from("Status detail: Tab focus diff/list, Esc back to list"),
+            Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G, J/K file jumps"),
             Line::from("Search: / start, Enter apply, n/N next or previous"),
             Line::from(""),
             Line::from("Stack groups shown when Graphite CLI (gt) is available."),
