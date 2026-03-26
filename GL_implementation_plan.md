@@ -82,6 +82,14 @@ Delivered:
 - `s` to toggle the stack view and `Esc` to close it
 - behavior tests covering stack-view availability and stack-aware rendering
 
+Subphase 5a: Diff Preload Cache
+
+- starts background diff preloading immediately after first paint
+- preloads branch diffs and highlighted render output into memory for visible branch order
+- opening a branch uses the preloaded diff when ready
+- opening a branch blocks on its in-flight preload if that branch is still loading
+- cache resets and restarts after refresh
+
 ### Phase 6: Worktree Support
 
 **Status:** Not started

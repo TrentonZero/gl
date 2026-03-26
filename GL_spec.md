@@ -58,6 +58,15 @@ GL treats `git worktree` as a primary workflow mechanism, not an advanced featur
 
 Each worktree is a distinct working context. GL should never confuse the state of one worktree with another. Worktree creation and removal happen in the shell; GL detects changes and updates its display.
 
+Current diff behavior:
+
+- Diffs are shown in unified form only.
+- File headers include per-file `+added -removed` numstat data when available.
+- Diff bodies support syntax highlighting through `syntect`.
+- Add and delete lines keep diff tinting on top of syntax colors.
+- Binary-file changes are rendered as metadata lines rather than raw content.
+- After first paint, GL begins preloading branch diffs and highlighted output into memory in the background.
+
 ---
 
 ## Views
@@ -326,6 +335,14 @@ Both default to `true`. When hidden, the full terminal height is available to th
 ## Keybindings
 
 GL uses vim-style modal keybindings where natural vim commands map cleanly to the interface. It does not attempt full vim emulation — no ex commands, no registers, no macros. Where a vim key has an obvious meaning in context, GL uses it. Where it doesn't, GL defines its own bindings. All keybindings are remappable in `~/.config/gl/config.toml`.
+
+Current runtime behavior:
+
+- Startup loads repository data synchronously.
+- Stack enrichment and commit-count calculation happen on background threads.
+- Branch diff and syntax-highlight preload begins asynchronously after the first frame is rendered.
+- Manual refresh rebuilds repository state and refreshes the active diff if it is still valid.
+- Optional profiling output is enabled through `GL_PROFILE`.
 
 ### Global (Available in All Views)
 
