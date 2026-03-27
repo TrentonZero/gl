@@ -31,15 +31,14 @@ Implemented today:
 - toggle whitespace-insensitive diff loading and show that state in the detail title
 - auto-refresh repo state from debounced filesystem and git metadata changes
 - refresh repo state manually with `R`
-- read `chrome`, `diff_view`, and `ignore_whitespace` from `~/.config/gl/config.toml`
+- run `:q`, `:branch <name>`, and `:search <term>` from a command overlay
+- support `--help`, `--version`, and a positional repo path
+- read `chrome`, `diff_view`, `ignore_whitespace`, `color_scheme`, `keybindings`, and `worktree_path_defaults` from `~/.config/gl/config.toml`
 - emit optional profiling logs via `GL_PROFILE`
 
 Not implemented today:
 
 - worktree manager
-- command mode
-- expanded config surface
-- `--help` / `--version`
 
 ---
 
@@ -193,23 +192,17 @@ Delivered:
 
 ### Phase 12: Command Line, Config, and Polish
 
-**Status:** Partial
+**Status:** Complete
 
 Delivered:
 
 - positional repo path argument
-- minimal config loading
+- `--help` and `--version`
+- `:` command overlay with `:q`, `:branch <name>`, and `:search <term>`
+- config support for keybinding overrides, color scheme selection, diff defaults, and worktree path defaults
+- bare-repo rejection with a direct working-tree-oriented error message
 - decent empty/error handling for common repo inspection failures
 - profiling hooks for performance investigation
-
-Missing:
-
-- `--help`
-- `--version`
-- command mode
-- keybinding remapping
-- theme/config customization
-- broader edge-case polish
 
 ---
 
@@ -219,9 +212,7 @@ The current implementation has already delivered the core product loop, so the r
 
 Recommended implementation order for the remaining phases:
 
-1. `Phase 12: Command Line, Config, and Polish`
-   Best handled after the product surface is more stable.
-2. `Phase 6: Worktree Support`
+1. `Phase 6: Worktree Support`
    Still the broadest feature, so it should wait until the viewer workflow is deeper.
 
 Short-term tightening work that can happen alongside the next phase:

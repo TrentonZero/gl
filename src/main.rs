@@ -38,14 +38,22 @@ static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn main() -> Result<()> {
     let _main_timer = perf::ScopeTimer::new("main");
-    let repo_arg = env::args().nth(1).map(PathBuf::from);
+    let cli = parse_cli_args(env::args().skip(1).collect())?;
+    if cli.show_help {
+        print_help();
+        return Ok(());
+    }
+    if cli.show_version {
+        println!("gl {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let config = {
         let _timer = perf::ScopeTimer::new("AppConfig::load");
         AppConfig::load()
     };
     let repo = {
         let _timer = perf::ScopeTimer::new("open_repo");
-        open_repo(repo_arg)?
+        open_repo(cli.repo_path)?
     };
     let stack_info = load_initial_stack_info(&repo);
     let mut app = {
@@ -53,6 +61,50 @@ fn main() -> Result<()> {
         App::new(config, repo, stack_info)
     };
     app.run()
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CliArgs {
+    repo_path: Option<PathBuf>,
+    show_help: bool,
+    show_version: bool,
+}
+
+fn parse_cli_args(args: Vec<String>) -> Result<CliArgs> {
+    let mut cli = CliArgs::default();
+    let mut positional = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => cli.show_help = true,
+            "--version" | "-V" => cli.show_version = true,
+            _ if arg.starts_with('-') => anyhow::bail!("unknown argument `{arg}`; try `gl --help`"),
+            _ => positional.push(arg),
+        }
+    }
+    if positional.len() > 1 {
+        anyhow::bail!("expected at most one repository path; try `gl --help`");
+    }
+    cli.repo_path = positional.into_iter().next().map(PathBuf::from);
+    Ok(cli)
+}
+
+fn print_help() {
+    println!(
+        "\
+gl {version}
+
+USAGE:
+  gl
+  gl <path>
+  gl --help
+  gl --version
+
+OPTIONS:
+  -h, --help       Show this help output
+  -V, --version    Show the application version
+",
+        version = env!("CARGO_PKG_VERSION")
+    );
 }
 
 struct StackLoadResult {
@@ -111,6 +163,8 @@ struct App {
     search_input: String,
     search_matches: Vec<usize>,
     search_cursor: usize,
+    command_mode: bool,
+    command_input: String,
     stack_result_tx: Sender<StackLoadResult>,
     stack_result_rx: Receiver<StackLoadResult>,
     stack_request_id: usize,
@@ -133,6 +187,7 @@ struct App {
     watch_event_rx: Receiver<WatchMessage>,
     _repo_watcher: Option<RepoWatcher>,
     watch_notice: Option<String>,
+    user_notice: Option<String>,
 }
 
 impl App {
@@ -146,6 +201,7 @@ impl App {
         stack_info: StackInfo,
         start_watcher: bool,
     ) -> Self {
+        let _ = &config.worktree_path_defaults;
         let diff_view = config.diff_view;
         let ignore_whitespace = config.ignore_whitespace;
         let display_entries = build_display_entries(&repo, &stack_info);
@@ -182,6 +238,8 @@ impl App {
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
+            command_mode: false,
+            command_input: String::new(),
             stack_result_tx,
             stack_result_rx,
             stack_request_id: 0,
@@ -204,6 +262,7 @@ impl App {
             watch_event_rx,
             _repo_watcher: repo_watcher,
             watch_notice,
+            user_notice: None,
         };
         app.reload_stack_decorations_async();
         app.reload_commit_counts_async();
@@ -280,6 +339,7 @@ impl App {
                             None
                         },
                         self.current_notice(),
+                        self.command_mode.then_some(self.command_input.as_str()),
                     );
                 })?;
                 if !first_draw_logged {
@@ -311,6 +371,14 @@ impl App {
                 continue;
             }
 
+            if self.command_mode {
+                if self.handle_command_input(key)? {
+                    break;
+                }
+                needs_redraw = true;
+                continue;
+            }
+
             if self.show_help {
                 self.show_help = false;
                 needs_redraw = true;
@@ -335,15 +403,20 @@ impl App {
 
     fn handle_global_keys(&mut self, key: &KeyEvent) -> Result<bool> {
         match key.code {
-            KeyCode::Char('q') => return Ok(true),
-            KeyCode::Char('?') => {
+            KeyCode::Char(ch) if ch == self.config.keybindings.quit => return Ok(true),
+            KeyCode::Char(ch) if ch == self.config.keybindings.help => {
                 self.show_help = true;
             }
-            KeyCode::Char('R') => {
+            KeyCode::Char(ch) if ch == self.config.keybindings.refresh => {
                 self.refresh_repo()?;
             }
-            KeyCode::Char('4') => {
+            KeyCode::Char(ch) if ch == self.config.keybindings.graph_view => {
                 self.toggle_graph_view()?;
+            }
+            KeyCode::Char(ch) if ch == self.config.keybindings.command => {
+                self.command_mode = true;
+                self.command_input.clear();
+                self.user_notice = None;
             }
             _ => {}
         }
@@ -364,11 +437,8 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-10)
             }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.open_selected_status()?
-            }
-            KeyCode::Char('s') => self.toggle_stack_view(),
-            KeyCode::Char('S') => self.open_selected_status()?,
+            KeyCode::Char(ch) if ch == self.config.keybindings.stack_view => self.toggle_stack_view(),
+            KeyCode::Char(ch) if ch == self.config.keybindings.status_view => self.open_selected_status()?,
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
             KeyCode::Tab if self.show_graph_view => {
                 self.focus = FocusedPane::Diff;
@@ -496,6 +566,59 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_command_input(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.command_mode = false;
+                self.command_input.clear();
+            }
+            KeyCode::Enter => {
+                self.command_mode = false;
+                let command = mem::take(&mut self.command_input);
+                return self.execute_command(command.trim());
+            }
+            KeyCode::Backspace => {
+                self.command_input.pop();
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.command_input.push(ch);
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn execute_command(&mut self, command: &str) -> Result<bool> {
+        self.user_notice = None;
+        if command.is_empty() {
+            return Ok(false);
+        }
+        if command == "q" {
+            return Ok(true);
+        }
+        if let Some(branch) = command.strip_prefix("branch ") {
+            let branch = branch.trim();
+            if self.jump_to_branch(branch) {
+                return Ok(false);
+            }
+            self.user_notice = Some(format!("No branch matched `{branch}`."));
+            return Ok(false);
+        }
+        if let Some(term) = command.strip_prefix("search ") {
+            let term = term.trim();
+            if term.is_empty() {
+                self.user_notice = Some("Search term cannot be empty.".to_string());
+            } else if self.search_branch_list(term) {
+                self.user_notice = Some(format!("Matched branch search `{term}`."));
+            } else {
+                self.user_notice = Some(format!("No branches contained `{term}`."));
+            }
+            return Ok(false);
+        }
+        self.user_notice = Some(format!("Unknown command `:{command}`."));
+        Ok(false)
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -1091,6 +1214,34 @@ impl App {
             })
     }
 
+    fn jump_to_branch(&mut self, branch_name: &str) -> bool {
+        let Some(index) = self
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == branch_name)
+        else {
+            return false;
+        };
+        self.selected_index = index;
+        self.show_graph_view = false;
+        self.show_stack_view = false;
+        self.focus = FocusedPane::BranchList;
+        true
+    }
+
+    fn search_branch_list(&mut self, term: &str) -> bool {
+        let term = term.to_lowercase();
+        let Some(index) = self.display_entries.iter().position(|entry| {
+            !entry.is_header() && entry.branch_name().to_lowercase().contains(&term)
+        }) else {
+            return false;
+        };
+        self.selected_index = index;
+        self.show_graph_view = false;
+        self.focus = FocusedPane::BranchList;
+        true
+    }
+
     fn scroll_diff(&mut self, delta: isize) {
         let max_scroll = self
             .branch_diff
@@ -1389,8 +1540,9 @@ impl App {
     }
 
     fn current_notice(&self) -> Option<&str> {
-        self.watch_notice
+        self.user_notice
             .as_deref()
+            .or(self.watch_notice.as_deref())
             .or_else(|| stack_notice(&self.stack_info))
     }
 
@@ -2034,6 +2186,8 @@ mod tests {
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
+            command_mode: false,
+            command_input: String::new(),
             stack_result_tx,
             stack_result_rx,
             stack_request_id: 0,
@@ -2056,7 +2210,30 @@ mod tests {
             watch_event_rx,
             _repo_watcher: None,
             watch_notice: None,
+            user_notice: None,
         }
+    }
+
+    #[test]
+    fn parse_cli_args_supports_help_version_and_repo_path() {
+        let cli = parse_cli_args(vec![
+            "--version".to_string(),
+            "/tmp/repo".to_string(),
+        ])
+        .unwrap();
+        assert!(cli.show_version);
+        assert_eq!(cli.repo_path, Some(PathBuf::from("/tmp/repo")));
+
+        let cli = parse_cli_args(vec!["--help".to_string()]).unwrap();
+        assert!(cli.show_help);
+    }
+
+    #[test]
+    fn parse_cli_args_rejects_unknown_flags() {
+        let error = parse_cli_args(vec!["--wat".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown argument"));
     }
 
     #[test]
@@ -2463,11 +2640,45 @@ mod tests {
         let mut app = make_test_app(make_test_entries());
         app.selected_index = 6;
 
-        app.handle_branch_list_keys(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SHIFT))
+        app.handle_branch_list_keys(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
             .unwrap();
 
         assert_eq!(app.detail_kind, Some(DetailKind::Status));
         assert!(!app.show_stack_view);
+    }
+
+    #[test]
+    fn execute_command_branch_jumps_to_named_branch() {
+        let mut app = make_test_app(make_test_entries());
+        assert!(!app.jump_to_branch("missing"));
+        assert!(!app.execute_command("branch missing").unwrap());
+        assert!(app
+            .user_notice
+            .as_deref()
+            .is_some_and(|message| message.contains("No branch matched")));
+
+        assert!(!app.execute_command("branch b1").unwrap());
+        assert_eq!(
+            app.selected_branch_name(),
+            Some("b1")
+        );
+    }
+
+    #[test]
+    fn execute_command_search_selects_first_matching_branch() {
+        let mut app = make_test_app(make_test_entries());
+        assert!(!app.execute_command("search a").unwrap());
+        assert_eq!(app.selected_branch_name(), Some("a1"));
+        assert!(app
+            .user_notice
+            .as_deref()
+            .is_some_and(|message| message.contains("Matched branch search")));
+    }
+
+    #[test]
+    fn execute_command_q_requests_quit() {
+        let mut app = make_test_app(make_test_entries());
+        assert!(app.execute_command("q").unwrap());
     }
 
     #[test]

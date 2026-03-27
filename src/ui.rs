@@ -1,5 +1,5 @@
 use crate::{
-    config::{AppConfig, DiffViewMode},
+    config::{AppConfig, ColorScheme, DiffViewMode},
     git::{BranchDiff, DetailKind, DiffLineKind, GraphCommit, RepoState},
 };
 use ratatui::{
@@ -95,6 +95,7 @@ pub fn draw(
     info_overlay: Option<&[String]>,
     search: Option<&str>,
     notice: Option<&str>,
+    command_input: Option<&str>,
 ) {
     let frame_area = frame.size();
     let areas = if config.chrome {
@@ -117,7 +118,7 @@ pub fn draw(
     };
 
     if config.chrome {
-        draw_status_bar(frame, areas[0], repo, detail_kind);
+        draw_status_bar(frame, areas[0], config, repo, detail_kind);
         draw_help_bar(
             frame,
             areas[2],
@@ -150,11 +151,16 @@ pub fn draw(
     if show_help {
         draw_help_overlay(frame, frame_area);
     }
+
+    if let Some(command_input) = command_input {
+        draw_command_overlay(frame, frame_area, command_input);
+    }
 }
 
 fn draw_status_bar(
     frame: &mut Frame<'_>,
     area: Rect,
+    config: &AppConfig,
     repo: &RepoState,
     detail_kind: Option<DetailKind>,
 ) {
@@ -178,7 +184,7 @@ fn draw_status_bar(
     ]);
     frame.render_widget(
         Paragraph::new(line)
-            .style(Style::default().bg(Color::Blue))
+            .style(Style::default().bg(accent_color(config.color_scheme)))
             .alignment(Alignment::Left),
         area,
     );
@@ -1028,6 +1034,23 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
         .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn draw_command_overlay(frame: &mut Frame<'_>, area: Rect, command_input: &str) {
+    let popup = centered_rect(72, 3, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(Line::from(format!(":{}", command_input)))
+            .block(Block::default().title("Command").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn accent_color(color_scheme: ColorScheme) -> Color {
+    match color_scheme {
+        ColorScheme::Ocean => Color::Blue,
+        ColorScheme::Forest => Color::Green,
+    }
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

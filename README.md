@@ -36,13 +36,14 @@ Today the app is focused on one core workflow:
   - first-parent local commit history for all local branches
   - branch-head labels in the graph list
   - `Enter` to open the owning branch in branch detail
+- Command overlay with `:q`, `:branch <name>`, and `:search <term>`
 - Manual refresh with `R` as a fallback when filesystem watching is unavailable
 - Optional top and bottom chrome via `~/.config/gl/config.toml`
 - Lightweight profiling logs when `GL_PROFILE=1`
 
 ## What Is Not Implemented Yet
 
-The repository still contains broader design docs for worktrees, graph view, command mode, and richer config. Those are not implemented in the current binary.
+The repository still contains broader design docs for worktrees and mutation workflows. Those are not implemented in the current binary.
 
 ## Prerequisites
 
@@ -79,6 +80,12 @@ gl
 
 # Run against a specific repo
 gl /path/to/repo
+
+# Show usage
+gl --help
+
+# Show version
+gl --version
 ```
 
 ## Keybindings
@@ -90,6 +97,7 @@ Branch list:
 - `gg` / `G`: jump to first or last branch
 - `Ctrl-d` / `Ctrl-u`: move faster through the list
 - `4`: open or close graph view
+- `:`: open command overlay
 - `Enter`: open selected branch diff
 - `S`: open the checked-out branch's working tree status
 - `s`: open or close the selected branch's stack view
@@ -136,9 +144,20 @@ Current supported options:
 chrome = true
 diff_view = "unified"
 ignore_whitespace = false
+color_scheme = "ocean"
+worktree_path_defaults = ["~/src/worktrees"]
+
+[keybindings]
+quit = "q"
+help = "?"
+refresh = "R"
+command = ":"
+stack_view = "s"
+status_view = "S"
+graph_view = "4"
 ```
 
-Set `chrome = false` to hide the top status bar and bottom help bar. Set `diff_view = "side-by-side"` or `ignore_whitespace = true` to start in those diff modes.
+Set `chrome = false` to hide the top status bar and bottom help bar. Set `diff_view = "side-by-side"` or `ignore_whitespace = true` to start in those diff modes. `color_scheme = "forest"` switches the accent color, and `[keybindings]` lets you remap the supported global shortcuts.
 
 ## Profiling
 
