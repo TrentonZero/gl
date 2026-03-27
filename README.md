@@ -54,6 +54,7 @@ If something is broken, feel free to report an issue, but I don't promise any gr
   - clean/dirty worktree status and checked-out branch
   - branch-list worktree tags
   - active-context switching with `Enter`
+  - asynchronous metadata loading after the first frame so startup does not wait on worktree scans
 - Command overlay with `:q`, `:branch <name>`, and `:search <term>`
 - Manual refresh with `R` as a fallback when filesystem watching is unavailable
 - Optional top and bottom chrome via `~/.config/gl/config.toml`

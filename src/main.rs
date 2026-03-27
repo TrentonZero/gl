@@ -94,6 +94,11 @@ struct CommitCountLoadResult {
     commit_counts: Vec<(String, usize)>,
 }
 
+struct WorktreeLoadResult {
+    request_id: usize,
+    worktrees: Vec<WorktreeInfo>,
+}
+
 #[derive(Clone)]
 struct PreloadedBranchDiff {
     diff: BranchDiff,
@@ -152,6 +157,9 @@ struct App {
     commit_count_result_tx: Sender<CommitCountLoadResult>,
     commit_count_result_rx: Receiver<CommitCountLoadResult>,
     commit_count_request_id: usize,
+    worktree_result_tx: Sender<WorktreeLoadResult>,
+    worktree_result_rx: Receiver<WorktreeLoadResult>,
+    worktree_request_id: usize,
     diff_preload_result_tx: Sender<DiffPreloadResult>,
     diff_preload_result_rx: Receiver<DiffPreloadResult>,
     diff_preload_request_id: usize,
@@ -186,12 +194,11 @@ impl App {
     ) -> Self {
         let diff_view = config.diff_view;
         let ignore_whitespace = config.ignore_whitespace;
-        let worktrees = load_worktrees(&repo.root).unwrap_or_default();
         let expanded_stacks = initial_expanded_stacks(&repo, &stack_info);
-        let display_entries =
-            build_display_entries(&repo, &stack_info, &worktrees, &expanded_stacks);
+        let display_entries = build_display_entries(&repo, &stack_info, &[], &expanded_stacks);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
+        let (worktree_result_tx, worktree_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
         let (watch_event_tx, watch_event_rx) = mpsc::channel();
         let (repo_watcher, watch_notice) = if start_watcher {
@@ -249,6 +256,9 @@ impl App {
             commit_count_result_tx,
             commit_count_result_rx,
             commit_count_request_id: 0,
+            worktree_result_tx,
+            worktree_result_rx,
+            worktree_request_id: 0,
             diff_preload_result_tx,
             diff_preload_result_rx,
             diff_preload_request_id: 0,
@@ -259,7 +269,7 @@ impl App {
             branch_detail: None,
             graph_commits: Vec::new(),
             graph_selected_index: 0,
-            worktrees,
+            worktrees: Vec::new(),
             worktree_selected_index: 0,
             diff_view,
             ignore_whitespace,
@@ -271,6 +281,7 @@ impl App {
         };
         app.reload_stack_decorations_async();
         app.reload_commit_counts_async();
+        app.reload_worktrees_async();
         app
     }
 
@@ -305,6 +316,9 @@ impl App {
                 needs_redraw = true;
             }
             if self.apply_pending_commit_count_updates() {
+                needs_redraw = true;
+            }
+            if self.apply_pending_worktree_updates() {
                 needs_redraw = true;
             }
             if self.apply_pending_diff_preloads() {
@@ -984,7 +998,7 @@ impl App {
         let _timer = perf::ScopeTimer::new("App::refresh_repo");
         logger::info(format!("refreshing repo root={}", self.repo.root.display()));
         self.repo = refresh_repo(&self.repo.root)?;
-        self.worktrees = load_worktrees(&self.repo.root).unwrap_or_default();
+        self.worktrees.clear();
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
         self.reset_diff_preload_state();
         self.rebuild_display_entries_preserve_selection(None);
@@ -1006,6 +1020,7 @@ impl App {
         }
         self.reload_stack_decorations_async();
         self.reload_commit_counts_async();
+        self.reload_worktrees_async();
         self.start_diff_preload_async();
 
         // Clamp selected_index to a valid selectable entry
@@ -1292,6 +1307,44 @@ impl App {
         changed
     }
 
+    fn reload_worktrees_async(&mut self) {
+        self.worktree_request_id += 1;
+        let request_id = self.worktree_request_id;
+        let root = self.repo.root.clone();
+        let tx = self.worktree_result_tx.clone();
+        thread::spawn(move || {
+            let _timer =
+                perf::ScopeTimer::new(format!("reload_worktrees_async request={request_id}"));
+            let worktrees = load_worktrees(&root).unwrap_or_default();
+            let _ = tx.send(WorktreeLoadResult {
+                request_id,
+                worktrees,
+            });
+        });
+    }
+
+    fn apply_pending_worktree_updates(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.worktree_result_rx.try_recv() {
+            if result.request_id != self.worktree_request_id {
+                continue;
+            }
+
+            let selected_branch = self.selected_branch_name().map(ToOwned::to_owned);
+            self.worktrees = result.worktrees;
+            if self.show_worktree_view {
+                self.worktree_selected_index = self
+                    .worktrees
+                    .iter()
+                    .position(|worktree| worktree.is_active)
+                    .unwrap_or(0);
+            }
+            self.rebuild_display_entries_preserve_selection(selected_branch.as_deref());
+            changed = true;
+        }
+        changed
+    }
+
     fn toggle_stack_view(&mut self) {
         if self.show_stack_view {
             self.show_stack_view = false;
@@ -1349,16 +1402,19 @@ impl App {
             self.focus = FocusedPane::BranchList;
             return Ok(());
         }
-        self.worktrees = load_worktrees(&self.repo.root)?;
-        self.worktree_selected_index = self
-            .worktrees
-            .iter()
-            .position(|worktree| worktree.is_active)
-            .unwrap_or(0);
         self.show_worktree_view = true;
         self.show_stack_view = false;
         self.show_graph_view = false;
         self.focus = FocusedPane::Diff;
+        if self.worktrees.is_empty() {
+            self.reload_worktrees_async();
+        } else {
+            self.worktree_selected_index = self
+                .worktrees
+                .iter()
+                .position(|worktree| worktree.is_active)
+                .unwrap_or(0);
+        }
         Ok(())
     }
 
@@ -2246,6 +2302,7 @@ mod tests {
     fn make_test_app(entries: Vec<BranchEntry>) -> App {
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
+        let (worktree_result_tx, worktree_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
         let (watch_event_tx, watch_event_rx) = mpsc::channel();
         let mut repo = make_repo_at(
@@ -2283,6 +2340,9 @@ mod tests {
             commit_count_result_tx,
             commit_count_result_rx,
             commit_count_request_id: 0,
+            worktree_result_tx,
+            worktree_result_rx,
+            worktree_request_id: 0,
             diff_preload_result_tx,
             diff_preload_result_rx,
             diff_preload_request_id: 0,
@@ -3030,6 +3090,44 @@ mod tests {
     fn execute_command_q_requests_quit() {
         let mut app = make_test_app(make_test_entries());
         assert!(app.execute_command("q").unwrap());
+    }
+
+    #[test]
+    fn async_worktree_update_backfills_branch_labels() {
+        let mut app = make_test_app(make_test_entries());
+        app.worktree_request_id = 1;
+
+        assert!(app.display_entries.iter().all(|entry| match entry {
+            BranchEntry::Branch { worktree_label, .. } => worktree_label.is_none(),
+            BranchEntry::Header { .. } => true,
+        }));
+
+        app.worktree_result_tx
+            .send(WorktreeLoadResult {
+                request_id: 1,
+                worktrees: vec![WorktreeInfo {
+                    path: PathBuf::from("/tmp/wt-a1"),
+                    branch: Some("a1".to_string()),
+                    is_bare: false,
+                    is_active: false,
+                    is_dirty: false,
+                }],
+            })
+            .unwrap();
+
+        assert!(app.apply_pending_worktree_updates());
+        let label = app
+            .display_entries
+            .iter()
+            .find_map(|entry| match entry {
+                BranchEntry::Branch {
+                    branch_name,
+                    worktree_label,
+                    ..
+                } if branch_name == "a1" => worktree_label.as_deref(),
+                _ => None,
+            });
+        assert_eq!(label, Some("wt-a1"));
     }
 
     #[test]

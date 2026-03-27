@@ -137,6 +137,7 @@ Completed:
 - Revalidated the codebase with clean `cargo build` and `cargo test` runs after the refactor.
 - Reduced the `src/ui.rs` help-bar renderer input surface to eliminate the remaining `clippy::too_many_arguments` warning.
 - Updated this plan to reflect the completed cleanup phases.
+- Moved worktree discovery and per-worktree dirty-state loading off the startup critical path so the initial branch list can render before worktree metadata backfills.
 
 **Goal:** Close out residual cleanup debt introduced or exposed by earlier phases.
 
