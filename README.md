@@ -13,6 +13,8 @@ Some things it does not do and probably will never do:
 - create/edit/update/push anything
 - view remote anything (other than some basic stats for local branches)
 
+A more detailed explanation of the opinions is in [the spec](GL_spec.md). 
+
 This is entirely, 100% vibe coded. That's not how I normally work, but its how this was built.
 
 It's really just meant to be a dashboard to help me keep track of what agents are doing in each work tree and on each branch stack. 
