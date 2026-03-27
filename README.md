@@ -1,53 +1,27 @@
 # gl
 
-`gl` is a terminal UI for browsing local git branches as branch-level diffs.
+`gl` is an opinionated terminal UI for browsing local git branches as branch-level diffs.
 
-Today the app is focused on one core workflow:
+Some things it does (or will do soon enough):
+- view local standalone branches
+- view graphite branches as stacks
+- view worktree states
+- view diffs either at the commit level of the branch level (and with or withot whitespace)
+- view staged and unstaged diffs
 
-- show local branches
-- group Graphite stacks when `gt` is available
-- open a branch as a combined diff against its base
-- navigate the diff quickly in the terminal
+Some things it does not do and probably will never do:
+- create/edit/update/push anything
+- view remote anything (other than some basic stats for local branches)
 
-## Current Features
+This is entirely, 100% vibe coded. That's not how I normally work, but its how this was built.
 
-- Local branch list with:
-  - current branch indicator
-  - ahead/behind tracking status
-  - async commit-count enrichment
-  - Graphite stack grouping and stale-branch markers when `gt` is available
-- Branch detail view with:
-  - combined branch diff against upstream, detected trunk, or Graphite parent
-  - syntax-highlighted diff rendering via `syntect`
-  - file-header jump navigation
-  - in-diff search with `n` and `N`
-  - unified or side-by-side layout toggled with `v`
-  - whitespace-insensitive reload toggled with `w`
-  - background preload of branch diffs and highlighted output after first paint
-- Debounced automatic refresh when repository files, refs, `HEAD`, or the index change
-- Status view for the checked-out branch with:
-  - working tree summary counts for staged, unstaged, and untracked files
-  - staged and unstaged combined diffs in the existing review pane
-  - untracked-file listing in the same jumpable file roster
-- Stack view with:
-  - selected-branch parent/child/base summary
-  - ordered stack branch roster with stale and tracking indicators
-- Graph view with:
-  - first-parent local commit history for all local branches
-  - branch-head labels in the graph list
-  - `Enter` to open the owning branch in branch detail
-- Worktree manager with:
-  - clean/dirty worktree status and checked-out branch
-  - branch-list worktree tags
-  - active-context switching with `Enter`
-- Command overlay with `:q`, `:branch <name>`, and `:search <term>`
-- Manual refresh with `R` as a fallback when filesystem watching is unavailable
-- Optional top and bottom chrome via `~/.config/gl/config.toml`
-- Lightweight profiling logs when `GL_PROFILE=1`
+It's really just meant to be a dashboard to help me keep track of what agents are doing in each work tree and on each branch stack. 
 
-## What Is Not Implemented Yet
+If you find that useful, feel free to check it out. If you don't, that's fine too.
 
-The repository still contains broader design docs for mutation workflows such as commit, rebase, push, and worktree creation. Those are not implemented in the current binary.
+If something is broken, feel free to report an issue, but I don't promise any great level of responsiveness: this is a vibe project, which makes it one level lower on my priority list than a hobby project.
+
+
 
 ## Prerequisites
 
@@ -79,7 +53,7 @@ cargo install --path .
 Or install from the sibling Homebrew tap repository:
 
 ```sh
-brew tap TrentonZero/gl /Users/kwalker/git/homebrew-gl
+brew tap TrentonZero/gl
 brew install --HEAD TrentonZero/gl/gl
 ```
 
