@@ -21,6 +21,8 @@ Today the app is focused on one core workflow:
   - syntax-highlighted diff rendering via `syntect`
   - file-header jump navigation
   - in-diff search with `n` and `N`
+  - unified or side-by-side layout toggled with `v`
+  - whitespace-insensitive reload toggled with `w`
   - background preload of branch diffs and highlighted output after first paint
 - Debounced automatic refresh when repository files, refs, `HEAD`, or the index change
 - Status view for the checked-out branch with:
@@ -36,7 +38,7 @@ Today the app is focused on one core workflow:
 
 ## What Is Not Implemented Yet
 
-The repository still contains broader design docs for worktrees, graph view, side-by-side diff, command mode, and richer config. Those are not implemented in the current binary.
+The repository still contains broader design docs for worktrees, graph view, command mode, and richer config. Those are not implemented in the current binary.
 
 ## Prerequisites
 
@@ -101,6 +103,8 @@ Diff pane:
 - `J` / `K`: jump between file headers
 - `gg` / `G`: top or bottom
 - `Ctrl-d` / `Ctrl-u`: half-page scroll
+- `v`: toggle unified / side-by-side diff view
+- `w`: ignore or show whitespace-only changes
 - `/`: start search
 - `n` / `N`: next or previous match
 
@@ -112,13 +116,15 @@ Config path:
 ~/.config/gl/config.toml
 ```
 
-Current supported option:
+Current supported options:
 
 ```toml
 chrome = true
+diff_view = "unified"
+ignore_whitespace = false
 ```
 
-Set `chrome = false` to hide the top status bar and bottom help bar.
+Set `chrome = false` to hide the top status bar and bottom help bar. Set `diff_view = "side-by-side"` or `ignore_whitespace = true` to start in those diff modes.
 
 ## Profiling
 

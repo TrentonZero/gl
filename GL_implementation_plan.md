@@ -26,17 +26,17 @@ Implemented today:
 - open a commit breakdown overlay and per-commit diff inspection
 - syntax highlight diff content with `syntect`
 - search within the diff
+- toggle between unified and side-by-side diff layouts
+- toggle whitespace-insensitive diff loading and show that state in the detail title
 - auto-refresh repo state from debounced filesystem and git metadata changes
 - refresh repo state manually with `R`
-- read `chrome = true|false` from `~/.config/gl/config.toml`
+- read `chrome`, `diff_view`, and `ignore_whitespace` from `~/.config/gl/config.toml`
 - emit optional profiling logs via `GL_PROFILE`
 
 Not implemented today:
 
 - worktree manager
 - graph view
-- side-by-side diff
-- whitespace diff modes
 - command mode
 - expanded config surface
 - `--help` / `--version`
@@ -173,7 +173,15 @@ Delivered:
 
 ### Phase 11: Side-by-Side Diff and Diff Options
 
-**Status:** Not started
+**Status:** Complete
+
+Delivered:
+
+- side-by-side diff rendering with synchronized vertical scrolling in the existing detail pane
+- `v` toggles unified versus side-by-side rendering for branch, commit, and status diffs
+- `w` reloads branch, commit, and status diffs with `--ignore-all-space`
+- config support for `diff_view = "unified" | "side-by-side"` and `ignore_whitespace = true|false`
+- behavior tests covering whitespace-insensitive diff loading, view-mode toggling, side-by-side pairing, and help text updates
 
 ### Phase 12: Command Line, Config, and Polish
 
@@ -203,13 +211,11 @@ The current implementation has already delivered the core product loop, so the r
 
 Recommended implementation order for the remaining phases:
 
-1. `Phase 11: Side-by-Side Diff and Diff Options`
-   Improves the core diff experience after the main review views are in place.
-2. `Phase 9: Graph View`
+1. `Phase 9: Graph View`
    Useful, but more specialized than status and commit inspection.
-3. `Phase 12: Command Line, Config, and Polish`
+2. `Phase 12: Command Line, Config, and Polish`
    Best handled after the product surface is more stable.
-4. `Phase 6: Worktree Support`
+3. `Phase 6: Worktree Support`
    Still the broadest feature, so it should wait until the viewer workflow is deeper.
 
 Short-term tightening work that can happen alongside the next phase:

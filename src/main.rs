@@ -7,7 +7,7 @@ mod ui;
 mod watch;
 
 use anyhow::{Context, Result};
-use config::AppConfig;
+use config::{AppConfig, DiffViewMode};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -16,7 +16,7 @@ use crossterm::{
 use git::{
     load_branch_commits, load_branch_diff, load_commit_counts, load_commit_diff,
     load_working_tree_status, open_repo, refresh_repo, BranchDiff, BranchInfo, CommitSummary,
-    DetailKind, RepoState,
+    DetailKind, DiffOptions, RepoState,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
@@ -123,6 +123,8 @@ struct App {
     diff_preload_failures: HashMap<String, String>,
     pending_diff_preloads: HashSet<String>,
     branch_detail: Option<BranchDetailState>,
+    diff_view: DiffViewMode,
+    ignore_whitespace: bool,
     _watch_event_tx: Sender<WatchMessage>,
     watch_event_rx: Receiver<WatchMessage>,
     _repo_watcher: Option<RepoWatcher>,
@@ -140,6 +142,8 @@ impl App {
         stack_info: StackInfo,
         start_watcher: bool,
     ) -> Self {
+        let diff_view = config.diff_view;
+        let ignore_whitespace = config.ignore_whitespace;
         let display_entries = build_display_entries(&repo, &stack_info);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
@@ -187,6 +191,8 @@ impl App {
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: HashSet::new(),
             branch_detail: None,
+            diff_view,
+            ignore_whitespace,
             _watch_event_tx: watch_event_tx,
             watch_event_rx,
             _repo_watcher: repo_watcher,
@@ -252,6 +258,7 @@ impl App {
                         self.branch_diff.as_ref(),
                         self.highlighted_diff.as_deref(),
                         self.diff_scroll,
+                        self.diff_view,
                         self.show_help,
                         self.focus,
                         self.commit_list_overlay_items(),
@@ -399,6 +406,8 @@ impl App {
                 self.search_mode = true;
                 self.search_input.clear();
             }
+            KeyCode::Char('v') => self.toggle_diff_view(),
+            KeyCode::Char('w') => self.toggle_whitespace_mode()?,
             KeyCode::Char('n') => self.advance_match(1),
             KeyCode::Char('N') => self.advance_match(-1),
             KeyCode::Char('i')
@@ -544,7 +553,8 @@ impl App {
                 self.highlighted_diff = Some(preloaded.highlighted_diff);
                 self.branch_diff = Some(preloaded.diff);
             } else {
-                let preloaded = preload_branch_diff(&self.repo.root, branch.clone())?;
+                let preloaded =
+                    preload_branch_diff(&self.repo.root, branch.clone(), self.diff_options())?;
                 self.preloaded_diffs
                     .insert(branch_name.clone(), preloaded.clone());
                 self.highlighted_diff = Some(preloaded.highlighted_diff);
@@ -586,7 +596,8 @@ impl App {
             return Ok(());
         }
 
-        let diff = load_working_tree_status(&self.repo.root, &branch.name)?;
+        let diff =
+            load_working_tree_status(&self.repo.root, &branch.name, self.diff_options())?;
         let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
         self.detail_kind = Some(DetailKind::Status);
         self.branch_detail = None;
@@ -655,7 +666,11 @@ impl App {
                     if let Some(branch) =
                         branch_for_diff(&self.repo, &self.stack_info, &branch_name)
                     {
-                        let preloaded = preload_branch_diff(&self.repo.root, branch.clone())?;
+                        let preloaded = preload_branch_diff(
+                            &self.repo.root,
+                            branch.clone(),
+                            self.diff_options(),
+                        )?;
                         self.preloaded_diffs
                             .insert(branch_name.clone(), preloaded.clone());
                         self.highlighted_diff = Some(preloaded.highlighted_diff);
@@ -678,7 +693,11 @@ impl App {
                     if let Some(head_branch) =
                         self.repo.branches.iter().find(|branch| branch.is_head)
                     {
-                        let diff = load_working_tree_status(&self.repo.root, &head_branch.name)?;
+                        let diff = load_working_tree_status(
+                            &self.repo.root,
+                            &head_branch.name,
+                            self.diff_options(),
+                        )?;
                         let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
                         self.branch_diff = Some(diff);
                         self.highlighted_diff = Some(highlighted_diff);
@@ -775,11 +794,13 @@ impl App {
 
         let root = self.repo.root.clone();
         let branch_name = branch.name.clone();
+        let options = self.diff_options();
         let tx = self.diff_preload_result_tx.clone();
         self.pending_diff_preloads.insert(branch_name.clone());
         thread::spawn(move || {
             let _timer = perf::ScopeTimer::new(format!("diff_preload branch={}", branch_name));
-            let preloaded = preload_branch_diff(&root, branch).map_err(|err| format!("{err:#}"));
+            let preloaded =
+                preload_branch_diff(&root, branch, options).map_err(|err| format!("{err:#}"));
             let _ = tx.send(DiffPreloadResult {
                 request_id,
                 branch_name,
@@ -1127,6 +1148,7 @@ impl App {
     }
 
     fn open_selected_commit_diff(&mut self) -> Result<()> {
+        let options = self.diff_options();
         let Some(detail) = &mut self.branch_detail else {
             return Ok(());
         };
@@ -1134,7 +1156,12 @@ impl App {
             return Ok(());
         };
 
-        let diff = load_commit_diff(&self.repo.root, &detail.branch_name, &commit)?;
+        let diff = load_commit_diff(
+            &self.repo.root,
+            &detail.branch_name,
+            &commit,
+            options,
+        )?;
         let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
         self.branch_diff = Some(diff);
         self.highlighted_diff = Some(highlighted_diff);
@@ -1245,6 +1272,43 @@ impl App {
             .as_deref()
             .or_else(|| stack_notice(&self.stack_info))
     }
+
+    fn diff_options(&self) -> DiffOptions {
+        DiffOptions {
+            ignore_whitespace: self.ignore_whitespace,
+        }
+    }
+
+    fn toggle_diff_view(&mut self) {
+        self.diff_view = match self.diff_view {
+            DiffViewMode::Unified => DiffViewMode::SideBySide,
+            DiffViewMode::SideBySide => DiffViewMode::Unified,
+        };
+    }
+
+    fn toggle_whitespace_mode(&mut self) -> Result<()> {
+        if self.detail_kind.is_none() {
+            return Ok(());
+        }
+
+        self.ignore_whitespace = !self.ignore_whitespace;
+        self.reset_diff_preload_state();
+        match self.detail_kind {
+            Some(DetailKind::BranchDiff) => {
+                if matches!(
+                    self.branch_detail.as_ref().map(|detail| &detail.diff_mode),
+                    Some(BranchDetailDiffMode::Commit { .. })
+                ) {
+                    self.open_selected_commit_diff()?;
+                } else {
+                    self.open_selected_branch()?;
+                }
+            }
+            Some(DetailKind::Status) => self.open_selected_status()?,
+            None => {}
+        }
+        Ok(())
+    }
 }
 
 fn load_initial_stack_info(repo: &RepoState) -> StackInfo {
@@ -1337,8 +1401,12 @@ fn diff_preload_targets(
     targets
 }
 
-fn preload_branch_diff(root: &std::path::Path, branch: BranchInfo) -> Result<PreloadedBranchDiff> {
-    let diff = load_branch_diff(root, &branch)?;
+fn preload_branch_diff(
+    root: &std::path::Path,
+    branch: BranchInfo,
+    options: DiffOptions,
+) -> Result<PreloadedBranchDiff> {
+    let diff = load_branch_diff(root, &branch, options)?;
     let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
     Ok(PreloadedBranchDiff {
         diff,
@@ -1858,6 +1926,8 @@ mod tests {
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: std::collections::HashSet::new(),
             branch_detail: None,
+            diff_view: DiffViewMode::Unified,
+            ignore_whitespace: false,
             _watch_event_tx: watch_event_tx,
             watch_event_rx,
             _repo_watcher: None,
@@ -2097,6 +2167,7 @@ mod tests {
                         branch_name: "a1".into(),
                         base_ref: Some("main".into()),
                         title: None,
+                        ignore_whitespace: false,
                         lines: vec![],
                         file_positions: vec![],
                     },
@@ -2127,6 +2198,7 @@ mod tests {
                     branch_name: "a1".into(),
                     base_ref: Some("main".into()),
                     title: None,
+                    ignore_whitespace: false,
                     lines: vec![],
                     file_positions: vec![],
                 },
@@ -2311,6 +2383,59 @@ mod tests {
                 .any(|line| line.text.contains("0 staged, 1 unstaged, 0 untracked"))
                 && diff.lines.iter().any(|line| line.text.contains("notes.txt"))
         }));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn toggle_diff_view_switches_between_unified_and_side_by_side() {
+        let mut app = make_test_app(make_test_entries());
+        assert_eq!(app.diff_view, DiffViewMode::Unified);
+        app.toggle_diff_view();
+        assert_eq!(app.diff_view, DiffViewMode::SideBySide);
+        app.toggle_diff_view();
+        assert_eq!(app.diff_view, DiffViewMode::Unified);
+    }
+
+    #[test]
+    fn toggle_whitespace_mode_reloads_branch_diff_with_ignore_all_space() {
+        let repo_root = unique_temp_dir("toggle-whitespace");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+        run_git(&repo_root, &["checkout", "-b", "feature"]);
+        fs::write(repo_root.join("notes.txt"), "base \n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "whitespace only"]);
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "feature")
+            .unwrap();
+
+        app.open_selected_branch().unwrap();
+        assert!(app
+            .branch_diff
+            .as_ref()
+            .is_some_and(|diff| diff.lines.iter().any(|line| matches!(
+                line.kind,
+                crate::git::DiffLineKind::Add | crate::git::DiffLineKind::Del
+            ))));
+
+        app.toggle_whitespace_mode().unwrap();
+        assert!(app.ignore_whitespace);
+        assert!(app
+            .branch_diff
+            .as_ref()
+            .is_some_and(|diff| diff.ignore_whitespace
+                && diff.lines.iter().any(|line| line.text.contains("identical"))));
 
         fs::remove_dir_all(repo_root).unwrap();
     }
