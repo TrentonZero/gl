@@ -5,11 +5,32 @@ use std::{env, fs, path::PathBuf};
 pub struct AppConfig {
     #[serde(default = "default_true")]
     pub chrome: bool,
+    #[serde(default)]
+    pub diff_view: DiffViewMode,
+    #[serde(default)]
+    pub ignore_whitespace: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiffViewMode {
+    Unified,
+    SideBySide,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { chrome: true }
+        Self {
+            chrome: true,
+            diff_view: DiffViewMode::Unified,
+            ignore_whitespace: false,
+        }
+    }
+}
+
+impl Default for DiffViewMode {
+    fn default() -> Self {
+        Self::Unified
     }
 }
 
@@ -72,5 +93,19 @@ mod tests {
         if let Ok(config) = result {
             assert!(config.chrome);
         }
+    }
+
+    #[test]
+    fn deserialize_side_by_side_diff_view() {
+        let toml_str = "diff_view = \"side-by-side\"\n";
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.diff_view, DiffViewMode::SideBySide);
+    }
+
+    #[test]
+    fn deserialize_ignore_whitespace_true() {
+        let toml_str = "ignore_whitespace = true\n";
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.ignore_whitespace);
     }
 }

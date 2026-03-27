@@ -1,5 +1,5 @@
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, DiffViewMode},
     git::{BranchDiff, DetailKind, DiffLineKind, RepoState},
 };
 use ratatui::{
@@ -80,6 +80,7 @@ pub fn draw(
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
+    diff_view: DiffViewMode,
     show_help: bool,
     focus: FocusedPane,
     commit_list_overlay: Option<Vec<String>>,
@@ -131,6 +132,7 @@ pub fn draw(
         branch_diff,
         highlighted_diff,
         diff_scroll,
+        diff_view,
         focus,
         commit_list_overlay.as_deref(),
         commit_list_selected,
@@ -200,10 +202,10 @@ fn help_bar_line(
                 "j/k move  J/K stacks  Enter open  S status  Esc close  q quit  ? help"
             }
             (Some(DetailKind::BranchDiff), FocusedPane::Diff) => {
-                "j/k scroll  J/K files  Tab commits  Enter open commit  Backspace branch  i info  / search  Esc list"
+                "j/k scroll  J/K files  Tab commits  v view  w whitespace  Enter open commit  Backspace branch  i info  / search  Esc list"
             }
             (Some(DetailKind::Status), FocusedPane::Diff) => {
-                "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  / search  n/N next  Esc list"
+                "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  v view  w whitespace  / search  n/N next  Esc list"
             }
             _ => ""
         }
@@ -243,6 +245,7 @@ fn draw_body(
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
+    diff_view: DiffViewMode,
     focus: FocusedPane,
     commit_list_overlay: Option<&[String]>,
     commit_list_selected: Option<usize>,
@@ -268,6 +271,7 @@ fn draw_body(
                 diff,
                 highlighted_diff,
                 diff_scroll,
+                diff_view,
                 focus == FocusedPane::Diff,
                 commit_list_overlay,
                 commit_list_selected,
@@ -460,6 +464,7 @@ fn draw_diff(
     diff: &BranchDiff,
     highlighted_diff: Option<&[Line<'static>]>,
     diff_scroll: usize,
+    diff_view: DiffViewMode,
     focused: bool,
     commit_list_overlay: Option<&[String]>,
     commit_list_selected: Option<usize>,
@@ -472,6 +477,11 @@ fn draw_diff(
             None => diff.branch_name.clone(),
         },
     });
+    let title = if diff.ignore_whitespace {
+        format!("{title} [w]")
+    } else {
+        title
+    };
 
     let block = Block::default()
         .title(title)
@@ -482,19 +492,33 @@ fn draw_diff(
             Style::default().fg(Color::DarkGray)
         });
 
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let lines = match highlighted_diff {
-        Some(lines) => visible_highlighted_lines(lines, diff_scroll, visible_height),
-        None => visible_plain_diff_lines(diff, diff_scroll, visible_height),
-    };
+    match diff_view {
+        DiffViewMode::Unified => {
+            let visible_height = area.height.saturating_sub(2) as usize;
+            let lines = match highlighted_diff {
+                Some(lines) => visible_highlighted_lines(lines, diff_scroll, visible_height),
+                None => visible_plain_diff_lines(diff, diff_scroll, visible_height),
+            };
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .scroll((0, 0))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(block)
+                    .scroll((0, 0))
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        DiffViewMode::SideBySide => {
+            frame.render_widget(block, area);
+            let inner = Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(2),
+            );
+            draw_side_by_side_diff(frame, inner, diff, diff_scroll);
+        }
+    }
 
     if let Some(lines) = commit_list_overlay {
         draw_commit_list_overlay(frame, area, lines, commit_list_selected.unwrap_or(0));
@@ -747,6 +771,169 @@ fn render_diff_line(index: usize, line: &crate::git::DiffLine) -> Line<'static> 
     ])
 }
 
+fn draw_side_by_side_diff(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    diff: &BranchDiff,
+    diff_scroll: usize,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let rows = side_by_side_rows(diff);
+    let Some((start, end)) = visible_slice_bounds(rows.len(), diff_scroll, area.height as usize)
+    else {
+        return;
+    };
+    let visible_rows = &rows[start..end];
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let left_width = columns[0].width.saturating_sub(5) as usize;
+    let right_width = columns[1].width.saturating_sub(5) as usize;
+
+    let left_lines: Vec<_> = visible_rows
+        .iter()
+        .map(|row| side_by_side_line(&row.left, left_width))
+        .collect();
+    let right_lines: Vec<_> = visible_rows
+        .iter()
+        .map(|row| side_by_side_line(&row.right, right_width))
+        .collect();
+
+    frame.render_widget(Paragraph::new(left_lines).wrap(Wrap { trim: false }), columns[0]);
+    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), columns[1]);
+}
+
+#[derive(Clone, Copy)]
+struct SideBySideCell<'a> {
+    gutter: Option<usize>,
+    text: &'a str,
+    kind: DiffLineKind,
+}
+
+#[derive(Clone, Copy)]
+struct SideBySideRow<'a> {
+    left: SideBySideCell<'a>,
+    right: SideBySideCell<'a>,
+}
+
+fn side_by_side_rows(diff: &BranchDiff) -> Vec<SideBySideRow<'_>> {
+    let mut rows = Vec::new();
+    let mut index = 0usize;
+
+    while index < diff.lines.len() {
+        let line = &diff.lines[index];
+        match line.kind {
+            DiffLineKind::Del => {
+                let mut dels = Vec::new();
+                while index < diff.lines.len() && diff.lines[index].kind == DiffLineKind::Del {
+                    dels.push((index + 1, diff.lines[index].text.as_str()));
+                    index += 1;
+                }
+
+                let mut adds = Vec::new();
+                while index < diff.lines.len() && diff.lines[index].kind == DiffLineKind::Add {
+                    adds.push((index + 1, diff.lines[index].text.as_str()));
+                    index += 1;
+                }
+
+                for pair_index in 0..dels.len().max(adds.len()) {
+                    let left = dels.get(pair_index).copied();
+                    let right = adds.get(pair_index).copied();
+                    rows.push(SideBySideRow {
+                        left: SideBySideCell {
+                            gutter: left.map(|(gutter, _)| gutter),
+                            text: left.map(|(_, text)| text).unwrap_or(""),
+                            kind: DiffLineKind::Del,
+                        },
+                        right: SideBySideCell {
+                            gutter: right.map(|(gutter, _)| gutter),
+                            text: right.map(|(_, text)| text).unwrap_or(""),
+                            kind: DiffLineKind::Add,
+                        },
+                    });
+                }
+            }
+            DiffLineKind::Add => {
+                rows.push(SideBySideRow {
+                    left: SideBySideCell {
+                        gutter: None,
+                        text: "",
+                        kind: DiffLineKind::Context,
+                    },
+                    right: SideBySideCell {
+                        gutter: Some(index + 1),
+                        text: line.text.as_str(),
+                        kind: DiffLineKind::Add,
+                    },
+                });
+                index += 1;
+            }
+            _ => {
+                rows.push(SideBySideRow {
+                    left: SideBySideCell {
+                        gutter: Some(index + 1),
+                        text: line.text.as_str(),
+                        kind: line.kind,
+                    },
+                    right: SideBySideCell {
+                        gutter: Some(index + 1),
+                        text: line.text.as_str(),
+                        kind: line.kind,
+                    },
+                });
+                index += 1;
+            }
+        }
+    }
+
+    rows
+}
+
+fn side_by_side_line(cell: &SideBySideCell<'_>, width: usize) -> Line<'static> {
+    let style = match cell.kind {
+        DiffLineKind::File => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        DiffLineKind::Hunk => Style::default().fg(Color::Cyan),
+        DiffLineKind::Context => Style::default().fg(Color::Gray),
+        DiffLineKind::Add => Style::default().fg(Color::Green).bg(Color::Rgb(31, 53, 31)),
+        DiffLineKind::Del => Style::default().fg(Color::Red).bg(Color::Rgb(59, 22, 22)),
+        DiffLineKind::Meta => Style::default().fg(Color::Yellow),
+    };
+    let gutter = cell
+        .gutter
+        .map(|value| format!("{value:>4} "))
+        .unwrap_or_else(|| "     ".to_string());
+
+    Line::from(vec![
+        Span::styled(gutter, Style::default().fg(Color::DarkGray)),
+        Span::styled(truncate_to_width(cell.text, width), style),
+    ])
+}
+
+fn truncate_to_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<_> = text.chars().collect();
+    if chars.len() <= width {
+        return chars.into_iter().collect();
+    }
+
+    if width == 1 {
+        return "~".to_string();
+    }
+
+    let mut truncated: String = chars.into_iter().take(width - 1).collect();
+    truncated.push('~');
+    truncated
+}
+
 fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
     let popup = centered_rect(72, 18, area);
     frame.render_widget(Clear, popup);
@@ -766,7 +953,7 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             Line::from("Branch detail: Tab commits, Enter commit diff, Backspace branch diff"),
             Line::from("Branch detail: i info overlay, any key dismisses"),
             Line::from("Status detail: Tab focus diff/list, Esc back to list"),
-            Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G, J/K file jumps"),
+            Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G, J/K file jumps, v view, w whitespace"),
             Line::from("Search: / start, Enter apply, n/N next or previous"),
             Line::from(""),
             Line::from("Stack groups shown when Graphite CLI (gt) is available."),
@@ -1056,6 +1243,24 @@ mod tests {
     }
 
     #[test]
+    fn help_bar_shows_diff_view_and_whitespace_hints() {
+        let line = help_bar_line(
+            false,
+            Some(DetailKind::BranchDiff),
+            FocusedPane::Diff,
+            None,
+            None,
+        );
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("v view"));
+        assert!(text.contains("w whitespace"));
+    }
+
+    #[test]
     fn stack_view_lines_render_trunk_parent_for_bottom_branch() {
         let stack_view = StackView {
             title: "auth stack".into(),
@@ -1118,5 +1323,33 @@ mod tests {
         assert!(text.contains("Stale    yes"));
         assert!(text.contains("▶ "));
         assert!(text.contains("⚠ "));
+    }
+
+    #[test]
+    fn side_by_side_rows_pair_deletions_with_additions() {
+        let diff = BranchDiff {
+            branch_name: "feature".into(),
+            base_ref: Some("main".into()),
+            title: None,
+            ignore_whitespace: false,
+            lines: vec![
+                crate::git::DiffLine {
+                    kind: DiffLineKind::Del,
+                    text: "-old".into(),
+                    file_path: Some("a.txt".into()),
+                },
+                crate::git::DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "+new".into(),
+                    file_path: Some("a.txt".into()),
+                },
+            ],
+            file_positions: vec![],
+        };
+
+        let rows = side_by_side_rows(&diff);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].left.text, "-old");
+        assert_eq!(rows[0].right.text, "+new");
     }
 }

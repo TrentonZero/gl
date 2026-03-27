@@ -37,8 +37,14 @@ pub struct BranchDiff {
     pub branch_name: String,
     pub base_ref: Option<String>,
     pub title: Option<String>,
+    pub ignore_whitespace: bool,
     pub lines: Vec<DiffLine>,
     pub file_positions: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffOptions {
+    pub ignore_whitespace: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +160,7 @@ pub fn load_commit_counts(root: &Path, repo: &RepoState) -> Vec<(String, usize)>
         .collect()
 }
 
-pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> {
+pub fn load_branch_diff(root: &Path, branch: &BranchInfo, options: DiffOptions) -> Result<BranchDiff> {
     let _timer = perf::ScopeTimer::new(format!("load_branch_diff branch={}", branch.name));
     let base_ref = branch.base_ref.clone();
     let Some(base_ref_name) = base_ref.clone() else {
@@ -162,6 +168,7 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
             branch_name: branch.name.clone(),
             base_ref,
             title: None,
+            ignore_whitespace: options.ignore_whitespace,
             lines: vec![DiffLine {
                 kind: DiffLineKind::Meta,
                 text: "No base branch available for diff.".to_string(),
@@ -181,24 +188,23 @@ pub fn load_branch_diff(root: &Path, branch: &BranchInfo) -> Result<BranchDiff> 
         ));
     }
 
-    let patch = git(
+    let patch = diff_command(
         root,
-        [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--find-renames",
-            merge_base,
-            &branch.name,
-        ],
+        &["--find-renames", merge_base, &branch.name],
+        options.ignore_whitespace,
     )?;
-    let stats = git(root, ["diff", "--numstat", merge_base, &branch.name])?;
+    let stats = diff_command(
+        root,
+        &["--numstat", merge_base, &branch.name],
+        options.ignore_whitespace,
+    )?;
     let stat_map = parse_numstat(&stats);
 
     Ok(parse_diff(
         branch.name.clone(),
         Some(base_ref_name),
         None,
+        options.ignore_whitespace,
         &patch,
         &stat_map,
     ))
@@ -236,20 +242,19 @@ pub fn load_commit_diff(
     root: &Path,
     branch_name: &str,
     commit: &CommitSummary,
+    options: DiffOptions,
 ) -> Result<BranchDiff> {
     let _timer = perf::ScopeTimer::new(format!("load_commit_diff commit={}", commit.short_oid));
-    let patch = git(
+    let patch = show_command(
         root,
-        [
-            "show",
-            "--format=",
-            "--no-color",
-            "--no-ext-diff",
-            "--find-renames",
-            &commit.oid,
-        ],
+        &["--format=", "--no-color", "--no-ext-diff", "--find-renames", &commit.oid],
+        options.ignore_whitespace,
     )?;
-    let stats = git(root, ["show", "--format=", "--numstat", &commit.oid])?;
+    let stats = show_command(
+        root,
+        &["--format=", "--numstat", &commit.oid],
+        options.ignore_whitespace,
+    )?;
     let stat_map = parse_numstat(&stats);
 
     Ok(parse_diff(
@@ -259,35 +264,30 @@ pub fn load_commit_diff(
             "{} @ {} {}",
             branch_name, commit.short_oid, commit.subject
         )),
+        options.ignore_whitespace,
         &patch,
         &stat_map,
     ))
 }
 
-pub fn load_working_tree_status(root: &Path, branch_name: &str) -> Result<BranchDiff> {
+pub fn load_working_tree_status(root: &Path, branch_name: &str, options: DiffOptions) -> Result<BranchDiff> {
     let _timer = perf::ScopeTimer::new(format!("load_working_tree_status branch={branch_name}"));
     let status_output = git(root, ["status", "--short"])?;
     let status_entries = parse_status_entries(&status_output);
-    let staged_patch = git(
+    let staged_patch =
+        diff_command(root, &["--find-renames", "--cached", "HEAD"], options.ignore_whitespace)?;
+    let staged_stats = parse_numstat(&diff_command(
         root,
-        [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--find-renames",
-            "--cached",
-            "HEAD",
-        ],
-    )?;
-    let staged_stats = parse_numstat(&git(root, ["diff", "--cached", "--numstat", "HEAD"])?);
-    let unstaged_patch = git(
-        root,
-        ["diff", "--no-color", "--no-ext-diff", "--find-renames"],
-    )?;
-    let unstaged_stats = parse_numstat(&git(root, ["diff", "--numstat"])?);
+        &["--cached", "--numstat", "HEAD"],
+        options.ignore_whitespace,
+    )?);
+    let unstaged_patch = diff_command(root, &["--find-renames"], options.ignore_whitespace)?;
+    let unstaged_stats =
+        parse_numstat(&diff_command(root, &["--numstat"], options.ignore_whitespace)?);
 
     Ok(build_working_tree_diff(
         branch_name,
+        options.ignore_whitespace,
         &status_entries,
         &staged_patch,
         &staged_stats,
@@ -406,6 +406,7 @@ fn parse_status_entries(output: &str) -> Vec<StatusEntry> {
 
 fn build_working_tree_diff(
     branch_name: &str,
+    ignore_whitespace: bool,
     status_entries: &[StatusEntry],
     staged_patch: &str,
     staged_stats: &HashMap<String, (String, String)>,
@@ -438,6 +439,7 @@ fn build_working_tree_diff(
             branch_name: branch_name.to_string(),
             base_ref: Some("working tree".to_string()),
             title: None,
+            ignore_whitespace,
             lines,
             file_positions,
         };
@@ -487,6 +489,7 @@ fn build_working_tree_diff(
         branch_name: branch_name.to_string(),
         base_ref: Some("working tree".to_string()),
         title: None,
+        ignore_whitespace,
         lines,
         file_positions,
     }
@@ -509,7 +512,7 @@ fn append_status_section(
         file_path: None,
     });
 
-    let section = parse_diff(String::new(), None, None, patch, stat_map);
+    let section = parse_diff(String::new(), None, None, false, patch, stat_map);
     let offset = lines.len();
     file_positions.extend(
         section
@@ -569,6 +572,7 @@ pub(crate) fn parse_diff(
     branch_name: String,
     base_ref: Option<String>,
     title: Option<String>,
+    ignore_whitespace: bool,
     patch: &str,
     stat_map: &HashMap<String, (String, String)>,
 ) -> BranchDiff {
@@ -645,15 +649,50 @@ pub(crate) fn parse_diff(
         branch_name,
         base_ref,
         title,
+        ignore_whitespace,
         lines,
         file_positions,
     }
+}
+
+fn diff_command(root: &Path, args: &[&str], ignore_whitespace: bool) -> Result<String> {
+    let mut owned = vec!["diff", "--no-color", "--no-ext-diff"];
+    if ignore_whitespace {
+        owned.push("--ignore-all-space");
+    }
+    owned.extend_from_slice(args);
+    git_vec(root, &owned)
+}
+
+fn show_command(root: &Path, args: &[&str], ignore_whitespace: bool) -> Result<String> {
+    let mut owned = vec!["show"];
+    if ignore_whitespace {
+        owned.push("--ignore-all-space");
+    }
+    owned.extend_from_slice(args);
+    git_vec(root, &owned)
 }
 
 fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
     let label = format!("git {}", args.join(" "));
     let _timer = perf::ScopeTimer::new(label);
     let output = run_git_command(root, &args)?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_vec(root: &Path, args: &[&str]) -> Result<String> {
+    let label = format!("git {}", args.join(" "));
+    let _timer = perf::ScopeTimer::new(label);
+    let output = run_git_command(root, args)?;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -804,6 +843,7 @@ mod tests {
             "feature".into(),
             Some("main".into()),
             None,
+            false,
             "",
             &HashMap::new(),
         );
@@ -828,7 +868,7 @@ index 0000000..ce01362
         let mut stats = HashMap::new();
         stats.insert("hello.txt".to_string(), ("2".to_string(), "0".to_string()));
 
-        let diff = parse_diff("feat".into(), Some("main".into()), None, patch, &stats);
+        let diff = parse_diff("feat".into(), Some("main".into()), None, false, patch, &stats);
         assert_eq!(diff.branch_name, "feat");
         assert_eq!(diff.file_positions, vec![0]);
 
@@ -862,7 +902,7 @@ index abc1234..def5678 100644
         let mut stats = HashMap::new();
         stats.insert("src/lib.rs".to_string(), ("1".to_string(), "1".to_string()));
 
-        let diff = parse_diff("fix".into(), None, None, patch, &stats);
+        let diff = parse_diff("fix".into(), None, None, false, patch, &stats);
         assert_eq!(diff.file_positions, vec![0]);
         assert_eq!(diff.lines[0].kind, DiffLineKind::File);
         assert!(diff.lines[0].text.contains("src/lib.rs"));
@@ -892,7 +932,7 @@ index 3333..4444 100644
 -foo
 +bar";
         let stats = HashMap::new();
-        let diff = parse_diff("multi".into(), Some("main".into()), None, patch, &stats);
+        let diff = parse_diff("multi".into(), Some("main".into()), None, false, patch, &stats);
         assert_eq!(diff.file_positions.len(), 2);
         assert_eq!(diff.lines[diff.file_positions[0]].kind, DiffLineKind::File);
         assert!(diff.lines[diff.file_positions[0]].text.contains("a.txt"));
@@ -907,7 +947,7 @@ diff --git a/image.png b/image.png
 index 1111..2222 100644
 Binary files a/image.png and b/image.png differ";
         let stats = HashMap::new();
-        let diff = parse_diff("bin".into(), None, None, patch, &stats);
+        let diff = parse_diff("bin".into(), None, None, false, patch, &stats);
         assert!(diff
             .lines
             .iter()
@@ -928,7 +968,7 @@ index 1111..2222 100644
 -old
 +new";
         let stats = HashMap::new();
-        let diff = parse_diff("rename".into(), None, None, patch, &stats);
+        let diff = parse_diff("rename".into(), None, None, false, patch, &stats);
         // rename from/to lines should be skipped, file header emitted
         assert_eq!(diff.file_positions.len(), 1);
         assert_eq!(diff.lines[0].kind, DiffLineKind::File);
@@ -945,7 +985,7 @@ index 1111..2222 100644
 -old
 +new";
         let stats = HashMap::new();
-        let diff = parse_diff("fp".into(), None, None, patch, &stats);
+        let diff = parse_diff("fp".into(), None, None, false, patch, &stats);
         // Code lines should have file_path set
         for line in &diff.lines {
             if matches!(line.kind, DiffLineKind::Add | DiffLineKind::Del) {
@@ -966,7 +1006,7 @@ index 1111..2222 100644
 +new
 \\ No newline at end of file";
         let stats = HashMap::new();
-        let diff = parse_diff("nonl".into(), None, None, patch, &stats);
+        let diff = parse_diff("nonl".into(), None, None, false, patch, &stats);
         let meta_lines: Vec<_> = diff
             .lines
             .iter()
@@ -977,7 +1017,15 @@ index 1111..2222 100644
 
     #[test]
     fn build_working_tree_diff_reports_clean_tree() {
-        let diff = build_working_tree_diff("main", &[], "", &HashMap::new(), "", &HashMap::new());
+        let diff = build_working_tree_diff(
+            "main",
+            false,
+            &[],
+            "",
+            &HashMap::new(),
+            "",
+            &HashMap::new(),
+        );
         assert_eq!(diff.base_ref.as_deref(), Some("working tree"));
         assert_eq!(diff.lines.len(), 1);
         assert!(diff.lines[0].text.contains("clean"));
@@ -1001,7 +1049,14 @@ index 1111..2222 100644
         fs::write(repo_root.join("untracked.txt"), "brand new\n").unwrap();
         run_git(&repo_root, &["add", "staged.txt"]);
 
-        let diff = load_working_tree_status(&repo_root, "main").unwrap();
+        let diff = load_working_tree_status(
+            &repo_root,
+            "main",
+            DiffOptions {
+                ignore_whitespace: false,
+            },
+        )
+        .unwrap();
         let text: Vec<_> = diff.lines.iter().map(|line| line.text.as_str()).collect();
         assert_eq!(diff.base_ref.as_deref(), Some("working tree"));
         assert!(text
@@ -1047,7 +1102,15 @@ index 1111..2222 100644
         assert_eq!(commits[0].subject, "second change");
         assert_eq!(commits[1].subject, "first change");
 
-        let diff = load_commit_diff(&repo_root, "feature", &commits[0]).unwrap();
+        let diff = load_commit_diff(
+            &repo_root,
+            "feature",
+            &commits[0],
+            DiffOptions {
+                ignore_whitespace: false,
+            },
+        )
+        .unwrap();
         assert_eq!(diff.branch_name, "feature");
         assert!(diff
             .title
@@ -1057,6 +1120,65 @@ index 1111..2222 100644
             .lines
             .iter()
             .any(|line| line.text.contains("notes.txt")));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn load_branch_diff_can_ignore_whitespace_only_changes() {
+        let repo_root = unique_temp_dir("whitespace-diff");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(
+            repo_root.join("main.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
+        run_git(&repo_root, &["add", "main.rs"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+        run_git(&repo_root, &["checkout", "-b", "feature"]);
+        fs::write(
+            repo_root.join("main.rs"),
+            "fn main(){\n println!(\"hi\");\n}\n",
+        )
+        .unwrap();
+        run_git(&repo_root, &["commit", "-am", "whitespace only"]);
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let branch = repo
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature")
+            .unwrap();
+        let regular = load_branch_diff(
+            &repo_root,
+            branch,
+            DiffOptions {
+                ignore_whitespace: false,
+            },
+        )
+        .unwrap();
+        let ignored = load_branch_diff(
+            &repo_root,
+            branch,
+            DiffOptions {
+                ignore_whitespace: true,
+            },
+        )
+        .unwrap();
+
+        assert!(regular
+            .lines
+            .iter()
+            .any(|line| matches!(line.kind, DiffLineKind::Add | DiffLineKind::Del)));
+        assert!(ignored
+            .lines
+            .iter()
+            .any(|line| line.text.contains("identical")));
+        assert!(ignored.ignore_whitespace);
 
         fs::remove_dir_all(repo_root).unwrap();
     }

@@ -450,7 +450,7 @@ These were originally open questions, now settled:
 Current implementation scope:
 
 - Implemented today: branch list, branch-level diff view, syntax highlighting, Graphite stack grouping, stack view, minimal config, and profiling hooks.
-- Not yet implemented: worktree manager, status view, commit drill-down, graph view, side-by-side diff, whitespace diff toggles, command mode, and mutation workflows such as commit, stage, rebase, push, or worktree creation.
+- Not yet implemented: worktree manager, graph view, command mode, and mutation workflows such as commit, stage, rebase, push, or worktree creation.
 
 ## Planned Extensions
 
