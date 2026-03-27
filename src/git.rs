@@ -13,6 +13,13 @@ pub struct RepoState {
     pub branches: Vec<BranchInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPaths {
+    pub root: PathBuf,
+    pub git_dir: PathBuf,
+    pub git_common_dir: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct BranchInfo {
     pub name: String,
@@ -113,6 +120,17 @@ pub fn refresh_repo(root: &Path) -> Result<RepoState> {
     Ok(RepoState {
         root: root.to_path_buf(),
         branches,
+    })
+}
+
+pub fn repo_paths(root: &Path) -> Result<RepoPaths> {
+    Ok(RepoPaths {
+        root: root.to_path_buf(),
+        git_dir: git_rev_parse_path(root, ["rev-parse", "--path-format=absolute", "--git-dir"])?,
+        git_common_dir: git_rev_parse_path(
+            root,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?,
     })
 }
 
@@ -648,6 +666,15 @@ fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn git_rev_parse_path<const N: usize>(root: &Path, args: [&str; N]) -> Result<PathBuf> {
+    let output = git(root, args)?;
+    let path = output.trim();
+    if path.is_empty() {
+        return Err(anyhow!("git rev-parse returned an empty path"));
+    }
+    Ok(PathBuf::from(path))
+}
+
 fn run_git_command(root: &Path, args: &[&str]) -> Result<Output> {
     for binary in ["git", "/usr/bin/git"] {
         match Command::new(binary).args(args).current_dir(root).output() {
@@ -1032,6 +1059,20 @@ index 1111..2222 100644
             .any(|line| line.text.contains("notes.txt")));
 
         fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn repo_paths_resolve_git_and_common_dirs_for_standard_repo() {
+        let repo_root = unique_temp_dir("repo-paths");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+
+        let paths = repo_paths(&repo_root).unwrap();
+        assert_eq!(paths.root, repo_root);
+        assert!(paths.git_dir.ends_with(".git"));
+        assert_eq!(paths.git_dir, paths.git_common_dir);
+
+        fs::remove_dir_all(paths.root).unwrap();
     }
 }
 

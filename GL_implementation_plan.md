@@ -6,12 +6,9 @@ This plan breaks the GL build into phases. Each phase produces a working, testab
 
 ---
 
-<<<<<<< HEAD
-## Current Implementation Status
-=======
 ## Current Build Summary
 
-The current binary is a working TUI centered on branch browsing and branch-level diff inspection.
+The current binary is a working TUI centered on branch browsing, stack-aware review, and branch/status inspection.
 
 Implemented today:
 
@@ -23,22 +20,21 @@ Implemented today:
 - detect Graphite stacks from `gt log short`
 - cache stack structure on disk
 - enrich stacks asynchronously with stale-branch detection
+- open a dedicated stack view for stacked branches
 - open a combined branch diff against the branch base
 - open a working tree status view for the checked-out branch
+- open a commit breakdown overlay and per-commit diff inspection
 - syntax highlight diff content with `syntect`
 - search within the diff
+- auto-refresh repo state from debounced filesystem and git metadata changes
 - refresh repo state manually with `R`
 - read `chrome = true|false` from `~/.config/gl/config.toml`
 - emit optional profiling logs via `GL_PROFILE`
 
 Not implemented today:
 
-- stack view
 - worktree manager
-- status view
-- commit drill-down
 - graph view
-- filesystem watching
 - side-by-side diff
 - whitespace diff modes
 - command mode
@@ -48,7 +44,6 @@ Not implemented today:
 ---
 
 ## Phase Status
->>>>>>> 4d92023 (Add checked-out branch status view)
 
 ### Phase 1: Skeleton and Branch List
 
@@ -165,18 +160,16 @@ Delivered:
 
 ### Phase 10: Filesystem Watching and Background Refresh
 
-**Status:** Partial foundation only
+**Status:** Complete
 
 Delivered:
 
 - background worker threads for stack enrichment
 - background worker threads for commit-count loading
-
-Missing:
-
-- filesystem watching
-- automatic refresh triggers
-- background diff refresh outside manual `R`
+- debounced filesystem watching for repo files plus git metadata (`HEAD`, refs, index, packed refs)
+- automatic refresh of branch list, stack decorations, status view, and open branch detail when watch events arrive
+- non-blocking degraded-mode notice when watcher setup fails, with manual `R` refresh preserved
+- behavior tests covering watch-path filtering, debounce behavior, and status-view refresh after worktree edits
 
 ### Phase 11: Side-by-Side Diff and Diff Options
 
@@ -210,15 +203,13 @@ The current implementation has already delivered the core product loop, so the r
 
 Recommended implementation order for the remaining phases:
 
-1. `Phase 10: Filesystem Watching and Background Refresh`
-   Becomes more valuable once multiple read surfaces benefit from staying warm.
-2. `Phase 11: Side-by-Side Diff and Diff Options`
+1. `Phase 11: Side-by-Side Diff and Diff Options`
    Improves the core diff experience after the main review views are in place.
-3. `Phase 9: Graph View`
+2. `Phase 9: Graph View`
    Useful, but more specialized than status and commit inspection.
-4. `Phase 12: Command Line, Config, and Polish`
+3. `Phase 12: Command Line, Config, and Polish`
    Best handled after the product surface is more stable.
-5. `Phase 6: Worktree Support`
+4. `Phase 6: Worktree Support`
    Still the broadest feature, so it should wait until the viewer workflow is deeper.
 
 Short-term tightening work that can happen alongside the next phase:
