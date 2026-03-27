@@ -135,6 +135,7 @@ Completed:
 
 - Removed residual dead-code allowances in `src/stack.rs` that were no longer needed.
 - Revalidated the codebase with clean `cargo build` and `cargo test` runs after the refactor.
+- Reduced the `src/ui.rs` help-bar renderer input surface to eliminate the remaining `clippy::too_many_arguments` warning.
 - Updated this plan to reflect the completed cleanup phases.
 
 **Goal:** Close out residual cleanup debt introduced or exposed by earlier phases.

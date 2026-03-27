@@ -116,6 +116,15 @@ struct BodyState<'a> {
     focus: FocusedPane,
 }
 
+struct HelpBarState<'a> {
+    keybindings: &'a KeyBindings,
+    stack_view_open: bool,
+    detail_kind: Option<DetailKind>,
+    focus: FocusedPane,
+    search: Option<&'a str>,
+    notice: Option<&'a str>,
+}
+
 struct DiffState<'a> {
     detail_kind: Option<DetailKind>,
     diff: &'a BranchDiff,
@@ -153,12 +162,14 @@ pub fn draw(frame: &mut Frame<'_>, state: DrawState<'_>) {
         draw_help_bar(
             frame,
             areas[2],
-            state.config,
-            state.stack_view.is_some(),
-            state.detail_kind,
-            state.focus,
-            state.search,
-            state.notice,
+            &HelpBarState {
+                keybindings: &state.config.keybindings,
+                stack_view_open: state.stack_view.is_some(),
+                detail_kind: state.detail_kind,
+                focus: state.focus,
+                search: state.search,
+                notice: state.notice,
+            },
         );
     }
 
@@ -224,23 +235,14 @@ fn draw_status_bar(
     );
 }
 
-fn draw_help_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    config: &AppConfig,
-    stack_view_open: bool,
-    detail_kind: Option<DetailKind>,
-    focus: FocusedPane,
-    search: Option<&str>,
-    notice: Option<&str>,
-) {
+fn draw_help_bar(frame: &mut Frame<'_>, area: Rect, state: &HelpBarState<'_>) {
     let line = help_bar_line(
-        &config.keybindings,
-        stack_view_open,
-        detail_kind,
-        focus,
-        search,
-        notice,
+        state.keybindings,
+        state.stack_view_open,
+        state.detail_kind,
+        state.focus,
+        state.search,
+        state.notice,
     );
     frame.render_widget(Paragraph::new(line), area);
 }
