@@ -1,6 +1,6 @@
 use crate::{
     config::{AppConfig, DiffViewMode},
-    git::{BranchDiff, DetailKind, DiffLineKind, RepoState},
+    git::{BranchDiff, DetailKind, DiffLineKind, GraphCommit, RepoState},
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -37,6 +37,12 @@ pub struct StackViewBranch {
     pub behind: usize,
     pub has_upstream: bool,
     pub stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphView<'a> {
+    pub commits: &'a [GraphCommit],
+    pub selected_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +82,7 @@ pub fn draw(
     display_entries: &[BranchEntry],
     selected_index: usize,
     stack_view: Option<&StackView>,
+    graph_view: Option<GraphView<'_>>,
     detail_kind: Option<DetailKind>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
@@ -128,6 +135,7 @@ pub fn draw(
         display_entries,
         selected_index,
         stack_view,
+        graph_view,
         detail_kind,
         branch_diff,
         highlighted_diff,
@@ -241,6 +249,7 @@ fn draw_body(
     display_entries: &[BranchEntry],
     selected_index: usize,
     stack_view: Option<&StackView>,
+    graph_view: Option<GraphView<'_>>,
     detail_kind: Option<DetailKind>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
@@ -286,6 +295,13 @@ fn draw_body(
                     .split(area);
                 draw_branch_list(frame, panes[0], display_entries, selected_index, true);
                 draw_stack_view(frame, panes[1], stack_view);
+            } else if let Some(graph_view) = graph_view {
+                let panes = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(34), Constraint::Min(1)])
+                    .split(area);
+                draw_branch_list(frame, panes[0], display_entries, selected_index, focus == FocusedPane::BranchList);
+                draw_graph_view(frame, panes[1], graph_view, focus == FocusedPane::Diff);
             } else {
                 draw_branch_list(frame, area, display_entries, selected_index, true);
             }
@@ -588,6 +604,55 @@ fn draw_stack_view(frame: &mut Frame<'_>, area: Rect, stack_view: &StackView) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn draw_graph_view(frame: &mut Frame<'_>, area: Rect, graph_view: GraphView<'_>, focused: bool) {
+    let items: Vec<ListItem<'_>> = graph_view
+        .commits
+        .iter()
+        .map(graph_commit_line)
+        .map(ListItem::new)
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(
+        graph_view
+            .selected_index
+            .min(graph_view.commits.len().saturating_sub(1)),
+    ));
+
+    let block = Block::default()
+        .title("Graph")
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Blue)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        });
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(51, 70, 124))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn graph_commit_line(commit: &GraphCommit) -> Line<'static> {
+    let labels = if commit.branch_labels.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", commit.branch_labels.join(", "))
+    };
+    Line::from(vec![
+        Span::styled(format!(" {} ", commit.graph), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{:<8}", commit.short_oid), Style::default().fg(Color::Yellow)),
+        Span::styled(commit.subject.clone(), Style::default().fg(Color::White)),
+        Span::styled(labels, Style::default().fg(Color::Green)),
+    ])
 }
 
 fn stack_view_lines(stack_view: &StackView) -> Vec<Line<'static>> {

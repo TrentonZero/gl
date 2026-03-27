@@ -24,6 +24,7 @@ Implemented today:
 - open a combined branch diff against the branch base
 - open a working tree status view for the checked-out branch
 - open a commit breakdown overlay and per-commit diff inspection
+- open a first-parent local commit graph view and jump from graph entries into branch detail
 - syntax highlight diff content with `syntect`
 - search within the diff
 - toggle between unified and side-by-side diff layouts
@@ -36,7 +37,6 @@ Implemented today:
 Not implemented today:
 
 - worktree manager
-- graph view
 - command mode
 - expanded config surface
 - `--help` / `--version`
@@ -156,7 +156,15 @@ Delivered:
 
 ### Phase 9: Graph View
 
-**Status:** Not started
+**Status:** Complete
+
+Delivered:
+
+- first-parent local commit graph built from local branch heads only
+- graph pane rendered alongside the branch list and opened with `4`
+- graph navigation with `j/k`, `J/K`, `gg/G`, and `Ctrl-d` / `Ctrl-u`
+- `Enter` on a graph row opens the owning branch in the existing branch detail flow
+- behavior tests covering graph loading, graph-view activation, and branch opening from the graph
 
 ### Phase 10: Filesystem Watching and Background Refresh
 
@@ -211,11 +219,9 @@ The current implementation has already delivered the core product loop, so the r
 
 Recommended implementation order for the remaining phases:
 
-1. `Phase 9: Graph View`
-   Useful, but more specialized than status and commit inspection.
-2. `Phase 12: Command Line, Config, and Polish`
+1. `Phase 12: Command Line, Config, and Polish`
    Best handled after the product surface is more stable.
-3. `Phase 6: Worktree Support`
+2. `Phase 6: Worktree Support`
    Still the broadest feature, so it should wait until the viewer workflow is deeper.
 
 Short-term tightening work that can happen alongside the next phase:
