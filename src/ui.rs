@@ -55,6 +55,7 @@ pub struct WorktreeView<'a> {
 pub enum BranchEntry {
     Header {
         label: String,
+        expanded: Option<bool>,
     },
     Branch {
         branch_name: String,
@@ -77,7 +78,7 @@ impl BranchEntry {
     pub fn branch_name(&self) -> &str {
         match self {
             BranchEntry::Branch { branch_name, .. } => branch_name,
-            BranchEntry::Header { label } => label,
+            BranchEntry::Header { label, .. } => label,
         }
     }
 }
@@ -400,8 +401,15 @@ fn draw_branch_list(
 
 fn branch_entry_item(entry: &BranchEntry, available_width: usize) -> Line<'static> {
     match entry {
-        BranchEntry::Header { label } => Line::from(vec![Span::styled(
-            format!(" {label}"),
+        BranchEntry::Header { label, expanded } => Line::from(vec![Span::styled(
+            format!(
+                " {} {label}",
+                match expanded {
+                    Some(true) => "▾",
+                    Some(false) => "▸",
+                    None => " ",
+                }
+            ),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -1179,6 +1187,7 @@ mod tests {
     fn header_is_header() {
         let entry = BranchEntry::Header {
             label: "test".into(),
+            expanded: Some(true),
         };
         assert!(entry.is_header());
     }
@@ -1219,6 +1228,7 @@ mod tests {
     fn branch_name_on_header() {
         let entry = BranchEntry::Header {
             label: "my stack".into(),
+            expanded: Some(false),
         };
         assert_eq!(entry.branch_name(), "my stack");
     }
@@ -1267,10 +1277,22 @@ mod tests {
     fn header_item_contains_label() {
         let entry = BranchEntry::Header {
             label: "auth stack".into(),
+            expanded: Some(true),
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("auth stack"));
+    }
+
+    #[test]
+    fn collapsed_header_item_shows_fold_marker() {
+        let entry = BranchEntry::Header {
+            label: "auth stack".into(),
+            expanded: Some(false),
+        };
+        let line = branch_entry_item(&entry, 40);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("▸"));
     }
 
     #[test]

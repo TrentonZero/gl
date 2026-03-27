@@ -194,6 +194,7 @@ struct App {
     config: AppConfig,
     repo: RepoState,
     stack_info: StackInfo,
+    expanded_stacks: HashSet<String>,
     display_entries: Vec<BranchEntry>,
     selected_index: usize,
     show_stack_view: bool,
@@ -253,7 +254,9 @@ impl App {
         let diff_view = config.diff_view;
         let ignore_whitespace = config.ignore_whitespace;
         let worktrees = load_worktrees(&repo.root).unwrap_or_default();
-        let display_entries = build_display_entries(&repo, &stack_info, &worktrees);
+        let expanded_stacks = initial_expanded_stacks(&repo, &stack_info);
+        let display_entries =
+            build_display_entries(&repo, &stack_info, &worktrees, &expanded_stacks);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
@@ -275,6 +278,7 @@ impl App {
             config,
             repo,
             stack_info,
+            expanded_stacks,
             display_entries,
             selected_index: 0,
             show_stack_view: false,
@@ -714,25 +718,27 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let selectable: Vec<usize> = self
-            .display_entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !e.is_header())
-            .map(|(i, _)| i)
-            .collect();
-
-        if selectable.is_empty() {
-            self.selected_index = 0;
+        let ordered_branches = ordered_branch_names(&self.repo, &self.stack_info);
+        if ordered_branches.is_empty() {
+            self.selected_index = self
+                .display_entries
+                .iter()
+                .position(|entry| !entry.is_header())
+                .unwrap_or(0);
             return;
         }
 
-        let current_pos = selectable
+        let current_branch = self.selected_branch_name().unwrap_or(&ordered_branches[0]);
+        let current_pos = ordered_branches
             .iter()
-            .position(|&i| i == self.selected_index)
+            .position(|branch| branch == current_branch)
             .unwrap_or(0);
-        let next_pos = (current_pos as isize + delta).clamp(0, (selectable.len() - 1) as isize);
-        self.selected_index = selectable[next_pos as usize];
+        let next_pos =
+            (current_pos as isize + delta).clamp(0, (ordered_branches.len() - 1) as isize);
+        let next_branch = &ordered_branches[next_pos as usize];
+
+        self.expand_stack_for_branch(next_branch);
+        self.select_branch(next_branch);
     }
 
     fn jump_stack_group(&mut self, direction: isize) {
@@ -1092,6 +1098,7 @@ impl App {
 
             let selected_branch = self.selected_branch_name().map(ToOwned::to_owned);
             self.stack_info = result.stack_info;
+            self.sync_expanded_stacks(selected_branch.as_deref());
             self.rebuild_display_entries_preserve_selection(selected_branch.as_deref());
             changed = true;
         }
@@ -1366,7 +1373,12 @@ impl App {
         let selected_branch = branch_name
             .map(ToOwned::to_owned)
             .or_else(|| self.selected_branch_name().map(ToOwned::to_owned));
-        self.display_entries = build_display_entries(&self.repo, &self.stack_info, &self.worktrees);
+        self.display_entries = build_display_entries(
+            &self.repo,
+            &self.stack_info,
+            &self.worktrees,
+            &self.expanded_stacks,
+        );
 
         if let Some(branch_name) = selected_branch {
             if let Some(index) = self
@@ -1399,6 +1411,7 @@ impl App {
     }
 
     fn jump_to_branch(&mut self, branch_name: &str) -> bool {
+        self.expand_stack_for_branch(branch_name);
         let Some(index) = self
             .display_entries
             .iter()
@@ -1424,6 +1437,44 @@ impl App {
         self.show_graph_view = false;
         self.focus = FocusedPane::BranchList;
         true
+    }
+
+    fn sync_expanded_stacks(&mut self, selected_branch: Option<&str>) {
+        let valid_stack_names: HashSet<_> = self
+            .stack_info
+            .stacks
+            .iter()
+            .map(|stack| stack.name.clone())
+            .collect();
+        self.expanded_stacks.retain(|stack| valid_stack_names.contains(stack));
+        for stack in &self.stack_info.stacks {
+            if !self.expanded_stacks.contains(&stack.name) && stack_contains_head(&self.repo, stack)
+            {
+                self.expanded_stacks.insert(stack.name.clone());
+            }
+        }
+        if let Some(branch_name) = selected_branch {
+            self.expand_stack_for_branch(branch_name);
+        }
+    }
+
+    fn expand_stack_for_branch(&mut self, branch_name: &str) {
+        if let Some(stack_name) = stack_name_for_branch(&self.stack_info, branch_name) {
+            self.expanded_stacks.insert(stack_name.to_string());
+        }
+    }
+
+    fn select_branch(&mut self, branch_name: &str) {
+        if let Some(index) = self
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == branch_name)
+        {
+            self.selected_index = index;
+            return;
+        }
+
+        self.rebuild_display_entries_preserve_selection(Some(branch_name));
     }
 
     fn scroll_diff(&mut self, delta: isize) {
@@ -1870,6 +1921,7 @@ fn build_display_entries(
     repo: &RepoState,
     stack_info: &StackInfo,
     worktrees: &[WorktreeInfo],
+    expanded_stacks: &HashSet<String>,
 ) -> Vec<BranchEntry> {
     let mut entries = Vec::new();
     let mut used_branches = std::collections::HashSet::new();
@@ -1889,9 +1941,14 @@ fn build_display_entries(
 
     // Stacked branches
     for stack in &stack_info.stacks {
+        used_branches.extend(stack.branches.iter().cloned());
         entries.push(BranchEntry::Header {
             label: stack.name.clone(),
+            expanded: Some(expanded_stacks.contains(&stack.name)),
         });
+        if !expanded_stacks.contains(&stack.name) {
+            continue;
+        }
         for (depth, branch_name) in stack.branches.iter().enumerate() {
             if let Some(branch) = branch_map.get(branch_name) {
                 let stale = stack_info.is_stale(branch_name);
@@ -1906,7 +1963,6 @@ fn build_display_entries(
                     stale,
                     worktree_label: worktree_by_branch.get(branch_name).cloned(),
                 });
-                used_branches.insert(branch_name.clone());
             }
         }
     }
@@ -1933,6 +1989,7 @@ fn build_display_entries(
         if !stack_info.stacks.is_empty() {
             entries.push(BranchEntry::Header {
                 label: "standalone".to_string(),
+                expanded: None,
             });
         }
         for branch_name in standalone_names {
@@ -1954,6 +2011,62 @@ fn build_display_entries(
     }
 
     entries
+}
+
+fn initial_expanded_stacks(repo: &RepoState, stack_info: &StackInfo) -> HashSet<String> {
+    stack_info
+        .stacks
+        .iter()
+        .filter(|stack| stack_contains_head(repo, stack))
+        .map(|stack| stack.name.clone())
+        .collect()
+}
+
+fn stack_contains_head(repo: &RepoState, stack: &stack::Stack) -> bool {
+    stack.branches.iter().any(|branch_name| {
+        repo.branches
+            .iter()
+            .any(|branch| branch.name == *branch_name && branch.is_head)
+    })
+}
+
+fn stack_name_for_branch<'a>(stack_info: &'a StackInfo, branch_name: &str) -> Option<&'a str> {
+    stack_info
+        .stacks
+        .iter()
+        .find(|stack| stack.branches.iter().any(|name| name == branch_name))
+        .map(|stack| stack.name.as_str())
+}
+
+fn ordered_branch_names(repo: &RepoState, stack_info: &StackInfo) -> Vec<String> {
+    let mut branches = Vec::new();
+    let mut used_branches = HashSet::new();
+
+    for stack in &stack_info.stacks {
+        for branch_name in &stack.branches {
+            if repo.branches.iter().any(|branch| branch.name == *branch_name) {
+                branches.push(branch_name.clone());
+                used_branches.insert(branch_name.clone());
+            }
+        }
+    }
+
+    for branch_name in &stack_info.standalone {
+        if repo.branches.iter().any(|branch| branch.name == *branch_name)
+            && !used_branches.contains(branch_name)
+        {
+            branches.push(branch_name.clone());
+            used_branches.insert(branch_name.clone());
+        }
+    }
+
+    for branch in &repo.branches {
+        if used_branches.insert(branch.name.clone()) {
+            branches.push(branch.name.clone());
+        }
+    }
+
+    branches
 }
 
 fn branch_for_diff(
@@ -2077,7 +2190,7 @@ mod tests {
     fn display_entries_no_stacks_flat_list() {
         let repo = make_repo(&["feat-a", "feat-b", "main"]);
         let stacks = empty_stacks();
-        let entries = build_display_entries(&repo, &stacks, &[]);
+        let entries = build_display_entries(&repo, &stacks, &[], &HashSet::new());
 
         // No headers when no stacks
         assert!(entries.iter().all(|e| !e.is_header()));
@@ -2098,7 +2211,12 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let entries = build_display_entries(&repo, &stacks, &[]);
+        let entries = build_display_entries(
+            &repo,
+            &stacks,
+            &[],
+            &HashSet::from(["auth stack".to_string()]),
+        );
 
         // Should have: header, auth-base, auth-ui, header(standalone), main
         let headers: Vec<_> = entries.iter().filter(|e| e.is_header()).collect();
@@ -2122,7 +2240,12 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let entries = build_display_entries(&repo, &stacks, &[]);
+        let entries = build_display_entries(
+            &repo,
+            &stacks,
+            &[],
+            &HashSet::from(["my stack".to_string()]),
+        );
 
         // Check indentation increases
         let branch_entries: Vec<_> = entries
@@ -2142,7 +2265,7 @@ mod tests {
     fn display_entries_standalone_no_header_when_no_stacks() {
         let repo = make_repo(&["main", "fix"]);
         let stacks = empty_stacks();
-        let entries = build_display_entries(&repo, &stacks, &[]);
+        let entries = build_display_entries(&repo, &stacks, &[], &HashSet::new());
         assert!(entries.iter().all(|e| !e.is_header()));
     }
 
@@ -2157,7 +2280,7 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let entries = build_display_entries(&repo, &stacks, &[]);
+        let entries = build_display_entries(&repo, &stacks, &[], &HashSet::new());
         let names: Vec<_> = entries.iter().map(BranchEntry::branch_name).collect();
         assert_eq!(names, vec!["topic", "main", "fix"]);
     }
@@ -2269,7 +2392,7 @@ mod tests {
             .display_entries
             .iter()
             .map(|entry| match entry {
-                BranchEntry::Header { label } => format!("header:{label}"),
+                BranchEntry::Header { label, .. } => format!("header:{label}"),
                 BranchEntry::Branch { branch_name, .. } => format!("branch:{branch_name}"),
             })
             .collect();
@@ -2281,8 +2404,6 @@ mod tests {
                 "branch:alpha-base",
                 "branch:alpha-top",
                 "header:beta-base stack",
-                "branch:beta-base",
-                "branch:beta-top",
                 "header:standalone",
                 "branch:main",
             ]
@@ -2301,6 +2422,7 @@ mod tests {
         vec![
             BranchEntry::Header {
                 label: "stack A".into(),
+                expanded: Some(true),
             },
             BranchEntry::Branch {
                 branch_name: "a1".into(),
@@ -2326,6 +2448,7 @@ mod tests {
             },
             BranchEntry::Header {
                 label: "stack B".into(),
+                expanded: Some(false),
             },
             BranchEntry::Branch {
                 branch_name: "b1".into(),
@@ -2340,6 +2463,7 @@ mod tests {
             },
             BranchEntry::Header {
                 label: "standalone".into(),
+                expanded: None,
             },
             BranchEntry::Branch {
                 branch_name: "main".into(),
@@ -2369,6 +2493,7 @@ mod tests {
             config: AppConfig::default(),
             repo,
             stack_info: empty_stacks(),
+            expanded_stacks: HashSet::new(),
             display_entries: entries,
             selected_index: 0,
             show_stack_view: false,
@@ -2484,6 +2609,123 @@ mod tests {
     }
 
     #[test]
+    fn non_current_stacks_start_folded() {
+        let mut repo = make_repo(&["alpha-base", "alpha-top", "beta-base", "beta-top", "main"]);
+        repo.branches[1].is_head = true;
+        let stacks = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "alpha stack".into(),
+                    branches: vec!["alpha-base".into(), "alpha-top".into()],
+                },
+                Stack {
+                    name: "beta stack".into(),
+                    branches: vec!["beta-base".into(), "beta-top".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+
+        let app = App::new_for_test(AppConfig::default(), repo, stacks);
+        let labels_and_branches: Vec<_> = app
+            .display_entries
+            .iter()
+            .map(|entry| match entry {
+                BranchEntry::Header { label, .. } => format!("header:{label}"),
+                BranchEntry::Branch { branch_name, .. } => format!("branch:{branch_name}"),
+            })
+            .collect();
+
+        assert_eq!(
+            labels_and_branches,
+            vec![
+                "header:alpha stack",
+                "branch:alpha-base",
+                "branch:alpha-top",
+                "header:beta stack",
+                "header:standalone",
+                "branch:main",
+            ]
+        );
+    }
+
+    #[test]
+    fn move_selection_expands_next_collapsed_stack() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[1].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a2")
+            .unwrap();
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+        let labels_and_branches: Vec<_> = app
+            .display_entries
+            .iter()
+            .map(|entry| match entry {
+                BranchEntry::Header { label, .. } => format!("header:{label}"),
+                BranchEntry::Branch { branch_name, .. } => format!("branch:{branch_name}"),
+            })
+            .collect();
+        assert!(labels_and_branches.contains(&"branch:b1".to_string()));
+    }
+
+    #[test]
+    fn move_selection_expands_previous_collapsed_stack() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[3].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "main")
+            .unwrap();
+
+        app.move_selection(-1);
+
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+    }
+
+    #[test]
     fn move_selection_clamps_at_start_of_branch_list() {
         let mut app = make_test_app(make_test_entries());
 
@@ -2594,7 +2836,8 @@ mod tests {
 
     #[test]
     fn toggle_stack_view_only_opens_for_branches_in_a_stack() {
-        let repo = make_repo(&["auth-base", "auth-ui", "main"]);
+        let mut repo = make_repo(&["auth-base", "auth-ui", "main"]);
+        repo.branches[0].is_head = true;
         let stack_info = StackInfo {
             stacks: vec![Stack {
                 name: "auth stack".into(),
@@ -2646,7 +2889,9 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         };
-        app.display_entries = build_display_entries(&app.repo, &app.stack_info, &[]);
+        app.expanded_stacks.insert("stack A".into());
+        app.display_entries =
+            build_display_entries(&app.repo, &app.stack_info, &[], &app.expanded_stacks);
         app.selected_index = app
             .display_entries
             .iter()
@@ -2678,7 +2923,12 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         };
-        let entries = build_display_entries(&repo, &stacks, &[]);
+        let entries = build_display_entries(
+            &repo,
+            &stacks,
+            &[],
+            &HashSet::from(["stack".to_string()]),
+        );
 
         let targets = diff_preload_targets(&repo, &stacks, &entries);
         let names: Vec<_> = targets.iter().map(|branch| branch.name.as_str()).collect();
@@ -3044,7 +3294,7 @@ mod tests {
             },
         ];
 
-        let entries = build_display_entries(&repo, &empty_stacks(), &worktrees);
+        let entries = build_display_entries(&repo, &empty_stacks(), &worktrees, &HashSet::new());
         let feature = entries
             .iter()
             .find(|entry| !entry.is_header() && entry.branch_name() == "feature")
