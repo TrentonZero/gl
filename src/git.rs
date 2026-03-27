@@ -108,6 +108,14 @@ struct StatusEntry {
 
 pub fn open_repo(path: Option<PathBuf>) -> Result<RepoState> {
     let start = path.unwrap_or(env::current_dir().context("failed to read current directory")?);
+    if git(&start, ["rev-parse", "--is-bare-repository"])
+        .map(|output| output.trim() == "true")
+        .unwrap_or(false)
+    {
+        return Err(anyhow!(
+            "bare repositories are not supported; open a working tree instead"
+        ));
+    }
     let root = discover_repo_root(&start)?;
     refresh_repo(&root)
 }
@@ -1264,6 +1272,17 @@ index 1111..2222 100644
         assert_eq!(paths.git_dir, paths.git_common_dir);
 
         fs::remove_dir_all(paths.root).unwrap();
+    }
+
+    #[test]
+    fn open_repo_rejects_bare_repositories() {
+        let repo_root = unique_temp_dir("bare-repo");
+        run_git(Path::new(std::env::temp_dir().as_path()), &["init", "--bare", repo_root.to_str().unwrap()]);
+
+        let error = open_repo(Some(repo_root.clone())).unwrap_err().to_string();
+        assert!(error.contains("bare repositories are not supported"));
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 
     #[test]

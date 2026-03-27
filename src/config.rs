@@ -9,6 +9,12 @@ pub struct AppConfig {
     pub diff_view: DiffViewMode,
     #[serde(default)]
     pub ignore_whitespace: bool,
+    #[serde(default)]
+    pub color_scheme: ColorScheme,
+    #[serde(default)]
+    pub keybindings: KeyBindings,
+    #[serde(default)]
+    pub worktree_path_defaults: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -18,12 +24,40 @@ pub enum DiffViewMode {
     SideBySide,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ColorScheme {
+    Ocean,
+    Forest,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KeyBindings {
+    #[serde(default = "default_quit_key")]
+    pub quit: char,
+    #[serde(default = "default_help_key")]
+    pub help: char,
+    #[serde(default = "default_refresh_key")]
+    pub refresh: char,
+    #[serde(default = "default_command_key")]
+    pub command: char,
+    #[serde(default = "default_stack_key")]
+    pub stack_view: char,
+    #[serde(default = "default_status_key")]
+    pub status_view: char,
+    #[serde(default = "default_graph_key")]
+    pub graph_view: char,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             chrome: true,
             diff_view: DiffViewMode::Unified,
             ignore_whitespace: false,
+            color_scheme: ColorScheme::Ocean,
+            keybindings: KeyBindings::default(),
+            worktree_path_defaults: Vec::new(),
         }
     }
 }
@@ -31,6 +65,26 @@ impl Default for AppConfig {
 impl Default for DiffViewMode {
     fn default() -> Self {
         Self::Unified
+    }
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        Self::Ocean
+    }
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        Self {
+            quit: default_quit_key(),
+            help: default_help_key(),
+            refresh: default_refresh_key(),
+            command: default_command_key(),
+            stack_view: default_stack_key(),
+            status_view: default_status_key(),
+            graph_view: default_graph_key(),
+        }
     }
 }
 
@@ -51,6 +105,34 @@ impl AppConfig {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_quit_key() -> char {
+    'q'
+}
+
+const fn default_help_key() -> char {
+    '?'
+}
+
+const fn default_refresh_key() -> char {
+    'R'
+}
+
+const fn default_command_key() -> char {
+    ':'
+}
+
+const fn default_stack_key() -> char {
+    's'
+}
+
+const fn default_status_key() -> char {
+    'S'
+}
+
+const fn default_graph_key() -> char {
+    '4'
 }
 
 #[cfg(test)]
@@ -107,5 +189,22 @@ mod tests {
         let toml_str = "ignore_whitespace = true\n";
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.ignore_whitespace);
+    }
+
+    #[test]
+    fn deserialize_keybindings_override() {
+        let toml_str = "[keybindings]\nquit = 'x'\nrefresh = 'r'\n";
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.keybindings.quit, 'x');
+        assert_eq!(config.keybindings.refresh, 'r');
+        assert_eq!(config.keybindings.help, '?');
+    }
+
+    #[test]
+    fn deserialize_color_scheme_and_worktree_defaults() {
+        let toml_str = "color_scheme = \"forest\"\nworktree_path_defaults = [\"~/src\", \"~/wt\"]\n";
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.color_scheme, ColorScheme::Forest);
+        assert_eq!(config.worktree_path_defaults.len(), 2);
     }
 }
