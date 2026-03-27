@@ -17,18 +17,58 @@ pub struct AppConfig {
     pub worktree_path_defaults: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DiffViewMode {
+    #[default]
     Unified,
     SideBySide,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ColorScheme {
+    #[default]
     Ocean,
     Forest,
+    Amber,
+    Violet,
+    Rose,
+    Teal,
+}
+
+impl ColorScheme {
+    pub const ALL: [ColorScheme; 6] = [
+        ColorScheme::Ocean,
+        ColorScheme::Forest,
+        ColorScheme::Amber,
+        ColorScheme::Violet,
+        ColorScheme::Rose,
+        ColorScheme::Teal,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ColorScheme::Ocean => "ocean",
+            ColorScheme::Forest => "forest",
+            ColorScheme::Amber => "amber",
+            ColorScheme::Violet => "violet",
+            ColorScheme::Rose => "rose",
+            ColorScheme::Teal => "teal",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ocean" => Some(ColorScheme::Ocean),
+            "forest" => Some(ColorScheme::Forest),
+            "amber" => Some(ColorScheme::Amber),
+            "violet" => Some(ColorScheme::Violet),
+            "rose" => Some(ColorScheme::Rose),
+            "teal" => Some(ColorScheme::Teal),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -59,18 +99,6 @@ impl Default for AppConfig {
             keybindings: KeyBindings::default(),
             worktree_path_defaults: Vec::new(),
         }
-    }
-}
-
-impl Default for DiffViewMode {
-    fn default() -> Self {
-        Self::Unified
-    }
-}
-
-impl Default for ColorScheme {
-    fn default() -> Self {
-        Self::Ocean
     }
 }
 
@@ -202,9 +230,31 @@ mod tests {
 
     #[test]
     fn deserialize_color_scheme_and_worktree_defaults() {
-        let toml_str = "color_scheme = \"forest\"\nworktree_path_defaults = [\"~/src\", \"~/wt\"]\n";
+        let toml_str =
+            "color_scheme = \"forest\"\nworktree_path_defaults = [\"~/src\", \"~/wt\"]\n";
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.color_scheme, ColorScheme::Forest);
         assert_eq!(config.worktree_path_defaults.len(), 2);
+    }
+
+    #[test]
+    fn deserialize_additional_color_schemes() {
+        let amber: AppConfig = toml::from_str("color_scheme = \"amber\"\n").unwrap();
+        let violet: AppConfig = toml::from_str("color_scheme = \"violet\"\n").unwrap();
+        let rose: AppConfig = toml::from_str("color_scheme = \"rose\"\n").unwrap();
+        let teal: AppConfig = toml::from_str("color_scheme = \"teal\"\n").unwrap();
+
+        assert_eq!(amber.color_scheme, ColorScheme::Amber);
+        assert_eq!(violet.color_scheme, ColorScheme::Violet);
+        assert_eq!(rose.color_scheme, ColorScheme::Rose);
+        assert_eq!(teal.color_scheme, ColorScheme::Teal);
+    }
+
+    #[test]
+    fn color_scheme_parse_and_format_round_trip() {
+        for scheme in ColorScheme::ALL {
+            assert_eq!(ColorScheme::parse(scheme.as_str()), Some(scheme));
+        }
+        assert_eq!(ColorScheme::parse("unknown"), None);
     }
 }

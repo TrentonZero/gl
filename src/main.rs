@@ -7,15 +7,14 @@ mod ui;
 mod watch;
 
 use anyhow::{Context, Result};
-use config::{AppConfig, DiffViewMode};
+use config::{AppConfig, ColorScheme, DiffViewMode};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use git::{
-    load_branch_commits, load_branch_diff, load_commit_counts, load_commit_diff,
-    load_commit_graph,
+    load_branch_commits, load_branch_diff, load_commit_counts, load_commit_diff, load_commit_graph,
     load_working_tree_status, load_worktrees, open_repo, refresh_repo, BranchDiff, BranchInfo,
     CommitSummary, DetailKind, DiffOptions, GraphCommit, RepoState, WorktreeInfo,
 };
@@ -30,7 +29,9 @@ use std::{
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
-use ui::{draw, BranchEntry, FocusedPane, GraphView, StackView, StackViewBranch, WorktreeView};
+use ui::{
+    draw, BranchEntry, DrawState, FocusedPane, GraphView, StackView, StackViewBranch, WorktreeView,
+};
 use watch::{start_repo_watcher, RepoWatcher, WatchMessage};
 
 #[cfg(test)]
@@ -47,10 +48,13 @@ fn main() -> Result<()> {
         println!("gl {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let config = {
+    let mut config = {
         let _timer = perf::ScopeTimer::new("AppConfig::load");
         AppConfig::load()
     };
+    if let Some(color_scheme) = cli.color_scheme {
+        config.color_scheme = color_scheme;
+    }
     let repo = {
         let _timer = perf::ScopeTimer::new("open_repo");
         open_repo(cli.repo_path)?
@@ -68,15 +72,30 @@ struct CliArgs {
     repo_path: Option<PathBuf>,
     show_help: bool,
     show_version: bool,
+    color_scheme: Option<ColorScheme>,
 }
 
 fn parse_cli_args(args: Vec<String>) -> Result<CliArgs> {
     let mut cli = CliArgs::default();
     let mut positional = Vec::new();
-    for arg in args {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => cli.show_help = true,
             "--version" | "-V" => cli.show_version = true,
+            "--color-scheme" => {
+                let Some(value) = args.next() else {
+                    anyhow::bail!(
+                        "missing value for --color-scheme; supported values: {}",
+                        supported_color_schemes()
+                    );
+                };
+                cli.color_scheme = Some(parse_color_scheme_arg(&value)?);
+            }
+            _ if arg.starts_with("--color-scheme=") => {
+                let value = arg.trim_start_matches("--color-scheme=");
+                cli.color_scheme = Some(parse_color_scheme_arg(value)?);
+            }
             _ if arg.starts_with('-') => anyhow::bail!("unknown argument `{arg}`; try `gl --help`"),
             _ => positional.push(arg),
         }
@@ -89,22 +108,48 @@ fn parse_cli_args(args: Vec<String>) -> Result<CliArgs> {
 }
 
 fn print_help() {
-    println!(
+    println!("{}", help_text());
+}
+
+fn help_text() -> String {
+    format!(
         "\
 gl {version}
 
 USAGE:
   gl
   gl <path>
+  gl --color-scheme <scheme>
   gl --help
   gl --version
 
 OPTIONS:
   -h, --help       Show this help output
   -V, --version    Show the application version
+      --color-scheme <scheme>
+                   Override the configured accent color
+                   Supported: {schemes}
 ",
-        version = env!("CARGO_PKG_VERSION")
-    );
+        version = env!("CARGO_PKG_VERSION"),
+        schemes = supported_color_schemes()
+    )
+}
+
+fn parse_color_scheme_arg(value: &str) -> Result<ColorScheme> {
+    ColorScheme::parse(value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown color scheme `{value}`; supported values: {}",
+            supported_color_schemes()
+        )
+    })
+}
+
+fn supported_color_schemes() -> String {
+    ColorScheme::ALL
+        .iter()
+        .map(|scheme| scheme.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 struct StackLoadResult {
@@ -218,7 +263,9 @@ impl App {
                 Ok(watcher) => (Some(watcher), None),
                 Err(error) => (
                     None,
-                    Some(format!("Filesystem watching unavailable; use R to refresh ({error})")),
+                    Some(format!(
+                        "Filesystem watching unavailable; use R to refresh ({error})"
+                    )),
                 ),
             }
         } else {
@@ -322,32 +369,35 @@ impl App {
                 terminal.draw(|frame| {
                     draw(
                         frame,
-                        &self.config,
-                        &self.repo,
-                        &self.display_entries,
-                        self.selected_index,
-                        self.current_stack_view().as_ref(),
-                        self.current_graph_view(),
-                        self.current_worktree_view(),
-                        self.detail_kind,
-                        self.branch_diff.as_ref(),
-                        self.highlighted_diff.as_deref(),
-                        self.diff_scroll,
-                        self.diff_view,
-                        self.show_help,
-                        self.focus,
-                        self.commit_list_overlay_items(),
-                        self.commit_list_overlay_selected(),
-                        self.branch_detail
-                            .as_ref()
-                            .and_then(|detail| detail.info_overlay.as_deref()),
-                        if self.search_mode {
-                            Some(self.search_input.as_str())
-                        } else {
-                            None
+                        DrawState {
+                            config: &self.config,
+                            repo: &self.repo,
+                            display_entries: &self.display_entries,
+                            selected_index: self.selected_index,
+                            stack_view: self.current_stack_view().as_ref(),
+                            graph_view: self.current_graph_view(),
+                            worktree_view: self.current_worktree_view(),
+                            detail_kind: self.detail_kind,
+                            branch_diff: self.branch_diff.as_ref(),
+                            highlighted_diff: self.highlighted_diff.as_deref(),
+                            diff_scroll: self.diff_scroll,
+                            diff_view: self.diff_view,
+                            show_help: self.show_help,
+                            focus: self.focus,
+                            commit_list_overlay: self.commit_list_overlay_items(),
+                            commit_list_selected: self.commit_list_overlay_selected(),
+                            info_overlay: self
+                                .branch_detail
+                                .as_ref()
+                                .and_then(|detail| detail.info_overlay.as_deref()),
+                            search: if self.search_mode {
+                                Some(self.search_input.as_str())
+                            } else {
+                                None
+                            },
+                            notice: self.current_notice(),
+                            command_input: self.command_mode.then_some(self.command_input.as_str()),
                         },
-                        self.current_notice(),
-                        self.command_mode.then_some(self.command_input.as_str()),
                     );
                 })?;
                 if !first_draw_logged {
@@ -451,8 +501,12 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-10)
             }
-            KeyCode::Char(ch) if ch == self.config.keybindings.stack_view => self.toggle_stack_view(),
-            KeyCode::Char(ch) if ch == self.config.keybindings.status_view => self.open_selected_status()?,
+            KeyCode::Char(ch) if ch == self.config.keybindings.stack_view => {
+                self.toggle_stack_view()
+            }
+            KeyCode::Char(ch) if ch == self.config.keybindings.status_view => {
+                self.open_selected_status()?
+            }
             KeyCode::Char('w') if self.detail_kind.is_none() => self.toggle_worktree_view()?,
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
             KeyCode::Esc if self.show_worktree_view => self.show_worktree_view = false,
@@ -803,8 +857,7 @@ impl App {
             return Ok(());
         }
 
-        let diff =
-            load_working_tree_status(&self.repo.root, &branch.name, self.diff_options())?;
+        let diff = load_working_tree_status(&self.repo.root, &branch.name, self.diff_options())?;
         let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
         self.detail_kind = Some(DetailKind::Status);
         self.branch_detail = None;
@@ -1229,8 +1282,7 @@ impl App {
             .iter()
             .rposition(|&index| index <= self.graph_selected_index)
             .unwrap_or(0);
-        let next =
-            (current_group as isize + direction).clamp(0, branch_heads.len() as isize - 1);
+        let next = (current_group as isize + direction).clamp(0, branch_heads.len() as isize - 1);
         self.graph_selected_index = branch_heads[next as usize];
     }
 
@@ -1273,13 +1325,16 @@ impl App {
         self.repo = refresh_repo(&worktree.path)?;
         self.worktrees = load_worktrees(&worktree.path)?;
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
-        let (repo_watcher, watch_notice) = match start_repo_watcher(&self.repo.root, self._watch_event_tx.clone()) {
-            Ok(watcher) => (Some(watcher), None),
-            Err(error) => (
-                None,
-                Some(format!("Filesystem watching unavailable; use R to refresh ({error})")),
-            ),
-        };
+        let (repo_watcher, watch_notice) =
+            match start_repo_watcher(&self.repo.root, self._watch_event_tx.clone()) {
+                Ok(watcher) => (Some(watcher), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "Filesystem watching unavailable; use R to refresh ({error})"
+                    )),
+                ),
+            };
         self._repo_watcher = repo_watcher;
         self.watch_notice = watch_notice;
         self.graph_commits.clear();
@@ -1557,12 +1612,7 @@ impl App {
             return Ok(());
         };
 
-        let diff = load_commit_diff(
-            &self.repo.root,
-            &detail.branch_name,
-            &commit,
-            options,
-        )?;
+        let diff = load_commit_diff(&self.repo.root, &detail.branch_name, &commit, options)?;
         let highlighted_diff = SyntaxHighlighter::new().highlight_diff(&diff)?;
         self.branch_diff = Some(diff);
         self.highlighted_diff = Some(highlighted_diff);
@@ -2366,11 +2416,7 @@ mod tests {
 
     #[test]
     fn parse_cli_args_supports_help_version_and_repo_path() {
-        let cli = parse_cli_args(vec![
-            "--version".to_string(),
-            "/tmp/repo".to_string(),
-        ])
-        .unwrap();
+        let cli = parse_cli_args(vec!["--version".to_string(), "/tmp/repo".to_string()]).unwrap();
         assert!(cli.show_version);
         assert_eq!(cli.repo_path, Some(PathBuf::from("/tmp/repo")));
 
@@ -2379,11 +2425,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_args_supports_color_scheme_override() {
+        let cli = parse_cli_args(vec![
+            "--color-scheme".to_string(),
+            "violet".to_string(),
+            "/tmp/repo".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cli.color_scheme, Some(ColorScheme::Violet));
+        assert_eq!(cli.repo_path, Some(PathBuf::from("/tmp/repo")));
+
+        let cli = parse_cli_args(vec!["--color-scheme=teal".to_string()]).unwrap();
+        assert_eq!(cli.color_scheme, Some(ColorScheme::Teal));
+    }
+
+    #[test]
     fn parse_cli_args_rejects_unknown_flags() {
         let error = parse_cli_args(vec!["--wat".to_string()])
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown argument"));
+    }
+
+    #[test]
+    fn parse_cli_args_rejects_invalid_or_missing_color_scheme() {
+        let invalid = parse_cli_args(vec!["--color-scheme".to_string(), "banana".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("unknown color scheme"));
+        assert!(invalid.contains("ocean"));
+
+        let missing = parse_cli_args(vec!["--color-scheme".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("missing value for --color-scheme"));
+    }
+
+    #[test]
+    fn help_text_lists_color_scheme_flag_and_values() {
+        let help = help_text();
+        assert!(help.contains("--color-scheme <scheme>"));
+        assert!(help.contains("ocean, forest, amber, violet, rose, teal"));
     }
 
     #[test]
@@ -2808,10 +2890,7 @@ mod tests {
             .is_some_and(|message| message.contains("No branch matched")));
 
         assert!(!app.execute_command("branch b1").unwrap());
-        assert_eq!(
-            app.selected_branch_name(),
-            Some("b1")
-        );
+        assert_eq!(app.selected_branch_name(), Some("b1"));
     }
 
     #[test]
@@ -2866,7 +2945,10 @@ mod tests {
             diff.lines
                 .iter()
                 .any(|line| line.text.contains("0 staged, 1 unstaged, 0 untracked"))
-                && diff.lines.iter().any(|line| line.text.contains("notes.txt"))
+                && diff
+                    .lines
+                    .iter()
+                    .any(|line| line.text.contains("notes.txt"))
         }));
 
         fs::remove_dir_all(repo_root).unwrap();
@@ -2920,7 +3002,10 @@ mod tests {
             .branch_diff
             .as_ref()
             .is_some_and(|diff| diff.ignore_whitespace
-                && diff.lines.iter().any(|line| line.text.contains("identical"))));
+                && diff
+                    .lines
+                    .iter()
+                    .any(|line| line.text.contains("identical"))));
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -2987,7 +3072,12 @@ mod tests {
         let feature_worktree = unique_temp_dir("feature-wt");
         run_git(
             &repo_root,
-            &["worktree", "add", feature_worktree.to_str().unwrap(), "feature"],
+            &[
+                "worktree",
+                "add",
+                feature_worktree.to_str().unwrap(),
+                "feature",
+            ],
         );
 
         let repo = refresh_repo(&repo_root).unwrap();

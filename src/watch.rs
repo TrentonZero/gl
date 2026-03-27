@@ -190,25 +190,40 @@ mod tests {
             Path::new("/repo/src/main.rs"),
             &repo_paths
         ));
-        assert!(should_refresh_for_path(Path::new("/repo/notes.txt"), &repo_paths));
+        assert!(should_refresh_for_path(
+            Path::new("/repo/notes.txt"),
+            &repo_paths
+        ));
     }
 
     #[test]
     fn ignores_git_metadata_duplicates_and_build_output() {
         let repo_paths = repo_paths();
-        assert!(!should_refresh_for_path(Path::new("/repo/.git"), &repo_paths));
+        assert!(!should_refresh_for_path(
+            Path::new("/repo/.git"),
+            &repo_paths
+        ));
         assert!(!should_refresh_for_path(
             Path::new("/repo/.git/index.lock"),
             &repo_paths
         ));
-        assert!(!should_refresh_for_path(Path::new("/repo/target/debug/gl"), &repo_paths));
+        assert!(!should_refresh_for_path(
+            Path::new("/repo/target/debug/gl"),
+            &repo_paths
+        ));
     }
 
     #[test]
     fn refreshes_for_head_index_and_refs_updates() {
         let repo_paths = repo_paths();
-        assert!(should_refresh_for_path(Path::new("/repo/.git/HEAD"), &repo_paths));
-        assert!(should_refresh_for_path(Path::new("/repo/.git/index"), &repo_paths));
+        assert!(should_refresh_for_path(
+            Path::new("/repo/.git/HEAD"),
+            &repo_paths
+        ));
+        assert!(should_refresh_for_path(
+            Path::new("/repo/.git/index"),
+            &repo_paths
+        ));
         assert!(should_refresh_for_path(
             Path::new("/repo/.git/refs/heads/main"),
             &repo_paths
@@ -235,11 +250,18 @@ mod tests {
             );
         });
 
-        raw_tx.send(vec![PathBuf::from("/repo/src/main.rs")]).unwrap();
-        raw_tx.send(vec![PathBuf::from("/repo/.git/index")]).unwrap();
+        raw_tx
+            .send(vec![PathBuf::from("/repo/src/main.rs")])
+            .unwrap();
+        raw_tx
+            .send(vec![PathBuf::from("/repo/.git/index")])
+            .unwrap();
         thread::sleep(Duration::from_millis(30));
 
-        assert_eq!(watch_rx.recv_timeout(Duration::from_millis(50)).unwrap(), WatchMessage::RefreshRequested);
+        assert_eq!(
+            watch_rx.recv_timeout(Duration::from_millis(50)).unwrap(),
+            WatchMessage::RefreshRequested
+        );
         assert!(watch_rx.recv_timeout(Duration::from_millis(20)).is_err());
 
         let _ = stop_tx.send(());

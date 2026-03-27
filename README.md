@@ -76,6 +76,16 @@ Or install directly via Cargo:
 cargo install --path .
 ```
 
+Or install from the sibling Homebrew tap repository:
+
+```sh
+brew tap TrentonZero/gl /Users/kwalker/git/homebrew-gl
+brew install --HEAD TrentonZero/gl/gl
+```
+
+The Homebrew formula lives in the tap repository at `../homebrew-gl/Formula/gl.rb`.
+The current `--HEAD` install pulls directly from the public GitHub repository.
+
 ## Usage
 
 ```sh
@@ -90,6 +100,9 @@ gl --help
 
 # Show version
 gl --version
+
+# Override the configured accent color
+gl --color-scheme violet
 ```
 
 ## Keybindings
@@ -169,7 +182,7 @@ status_view = "S"
 graph_view = "4"
 ```
 
-Set `chrome = false` to hide the top status bar and bottom help bar. Set `diff_view = "side-by-side"` or `ignore_whitespace = true` to start in those diff modes. `color_scheme = "forest"` switches the accent color, and `[keybindings]` lets you remap the supported global shortcuts.
+Set `chrome = false` to hide the top status bar and bottom help bar. Set `diff_view = "side-by-side"` or `ignore_whitespace = true` to start in those diff modes. `color_scheme` supports `ocean`, `forest`, `amber`, `violet`, `rose`, and `teal` for the accent color, `gl --color-scheme <scheme>` overrides that value for a single launch, and `[keybindings]` lets you remap the supported global shortcuts.
 
 ## Profiling
 

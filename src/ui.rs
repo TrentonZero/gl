@@ -39,13 +39,13 @@ pub struct StackViewBranch {
     pub stale: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphView<'a> {
     pub commits: &'a [GraphCommit],
     pub selected_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorktreeView<'a> {
     pub worktrees: &'a [WorktreeInfo],
     pub selected_index: usize,
@@ -82,31 +82,53 @@ impl BranchEntry {
     }
 }
 
-pub fn draw(
-    frame: &mut Frame<'_>,
-    config: &AppConfig,
-    repo: &RepoState,
-    display_entries: &[BranchEntry],
+pub struct DrawState<'a> {
+    pub config: &'a AppConfig,
+    pub repo: &'a RepoState,
+    pub display_entries: &'a [BranchEntry],
+    pub selected_index: usize,
+    pub stack_view: Option<&'a StackView>,
+    pub graph_view: Option<GraphView<'a>>,
+    pub worktree_view: Option<WorktreeView<'a>>,
+    pub detail_kind: Option<DetailKind>,
+    pub branch_diff: Option<&'a BranchDiff>,
+    pub highlighted_diff: Option<&'a [Line<'static>]>,
+    pub diff_scroll: usize,
+    pub diff_view: DiffViewMode,
+    pub show_help: bool,
+    pub focus: FocusedPane,
+    pub commit_list_overlay: Option<Vec<String>>,
+    pub commit_list_selected: Option<usize>,
+    pub info_overlay: Option<&'a [String]>,
+    pub search: Option<&'a str>,
+    pub notice: Option<&'a str>,
+    pub command_input: Option<&'a str>,
+}
+
+struct BodyState<'a> {
+    display_entries: &'a [BranchEntry],
     selected_index: usize,
-    stack_view: Option<&StackView>,
-    graph_view: Option<GraphView<'_>>,
-    worktree_view: Option<WorktreeView<'_>>,
+    stack_view: Option<&'a StackView>,
+    graph_view: Option<GraphView<'a>>,
+    worktree_view: Option<WorktreeView<'a>>,
+    diff: Option<DiffState<'a>>,
+    focus: FocusedPane,
+}
+
+struct DiffState<'a> {
     detail_kind: Option<DetailKind>,
-    branch_diff: Option<&BranchDiff>,
-    highlighted_diff: Option<&[Line<'static>]>,
+    diff: &'a BranchDiff,
+    highlighted_diff: Option<&'a [Line<'static>]>,
     diff_scroll: usize,
     diff_view: DiffViewMode,
-    show_help: bool,
-    focus: FocusedPane,
-    commit_list_overlay: Option<Vec<String>>,
+    commit_list_overlay: Option<&'a [String]>,
     commit_list_selected: Option<usize>,
-    info_overlay: Option<&[String]>,
-    search: Option<&str>,
-    notice: Option<&str>,
-    command_input: Option<&str>,
-) {
+    info_overlay: Option<&'a [String]>,
+}
+
+pub fn draw(frame: &mut Frame<'_>, state: DrawState<'_>) {
     let frame_area = frame.size();
-    let areas = if config.chrome {
+    let areas = if state.config.chrome {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -125,43 +147,44 @@ pub fn draw(
         ]
     };
 
-    if config.chrome {
-        draw_status_bar(frame, areas[0], config, repo, detail_kind);
+    if state.config.chrome {
+        draw_status_bar(frame, areas[0], state.config, state.repo, state.detail_kind);
         draw_help_bar(
             frame,
             areas[2],
-            stack_view.is_some(),
-            detail_kind,
-            focus,
-            search,
-            notice,
+            state.stack_view.is_some(),
+            state.detail_kind,
+            state.focus,
+            state.search,
+            state.notice,
         );
     }
 
-    draw_body(
-        frame,
-        areas[1],
-        display_entries,
-        selected_index,
-        stack_view,
-        graph_view,
-        worktree_view,
-        detail_kind,
-        branch_diff,
-        highlighted_diff,
-        diff_scroll,
-        diff_view,
-        focus,
-        commit_list_overlay.as_deref(),
-        commit_list_selected,
-        info_overlay,
-    );
+    let body_state = BodyState {
+        display_entries: state.display_entries,
+        selected_index: state.selected_index,
+        stack_view: state.stack_view,
+        graph_view: state.graph_view,
+        worktree_view: state.worktree_view,
+        diff: state.branch_diff.map(|diff| DiffState {
+            detail_kind: state.detail_kind,
+            diff,
+            highlighted_diff: state.highlighted_diff,
+            diff_scroll: state.diff_scroll,
+            diff_view: state.diff_view,
+            commit_list_overlay: state.commit_list_overlay.as_deref(),
+            commit_list_selected: state.commit_list_selected,
+            info_overlay: state.info_overlay,
+        }),
+        focus: state.focus,
+    };
+    draw_body(frame, areas[1], &body_state);
 
-    if show_help {
+    if state.show_help {
         draw_help_overlay(frame, frame_area);
     }
 
-    if let Some(command_input) = command_input {
+    if let Some(command_input) = state.command_input {
         draw_command_overlay(frame, frame_area, command_input);
     }
 }
@@ -258,25 +281,8 @@ fn help_bar_line(
     line
 }
 
-fn draw_body(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    display_entries: &[BranchEntry],
-    selected_index: usize,
-    stack_view: Option<&StackView>,
-    graph_view: Option<GraphView<'_>>,
-    worktree_view: Option<WorktreeView<'_>>,
-    detail_kind: Option<DetailKind>,
-    branch_diff: Option<&BranchDiff>,
-    highlighted_diff: Option<&[Line<'static>]>,
-    diff_scroll: usize,
-    diff_view: DiffViewMode,
-    focus: FocusedPane,
-    commit_list_overlay: Option<&[String]>,
-    commit_list_selected: Option<usize>,
-    info_overlay: Option<&[String]>,
-) {
-    match branch_diff {
+fn draw_body(frame: &mut Frame<'_>, area: Rect, state: &BodyState<'_>) {
+    match state.diff.as_ref() {
         Some(diff) => {
             let panes = Layout::default()
                 .direction(Direction::Horizontal)
@@ -285,48 +291,70 @@ fn draw_body(
             draw_branch_list(
                 frame,
                 panes[0],
-                display_entries,
-                selected_index,
-                focus == FocusedPane::BranchList,
+                state.display_entries,
+                state.selected_index,
+                state.focus == FocusedPane::BranchList,
             );
-            draw_diff(
-                frame,
-                panes[1],
-                detail_kind,
-                diff,
-                highlighted_diff,
-                diff_scroll,
-                diff_view,
-                focus == FocusedPane::Diff,
-                commit_list_overlay,
-                commit_list_selected,
-                info_overlay,
-            );
+            draw_diff(frame, panes[1], diff, state.focus == FocusedPane::Diff);
         }
         None => {
-            if let Some(stack_view) = stack_view {
+            if let Some(stack_view) = state.stack_view {
                 let panes = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Length(34), Constraint::Min(1)])
                     .split(area);
-                draw_branch_list(frame, panes[0], display_entries, selected_index, true);
+                draw_branch_list(
+                    frame,
+                    panes[0],
+                    state.display_entries,
+                    state.selected_index,
+                    true,
+                );
                 draw_stack_view(frame, panes[1], stack_view);
-            } else if let Some(graph_view) = graph_view {
+            } else if let Some(graph_view) = state.graph_view {
                 let panes = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Length(34), Constraint::Min(1)])
                     .split(area);
-                draw_branch_list(frame, panes[0], display_entries, selected_index, focus == FocusedPane::BranchList);
-                draw_graph_view(frame, panes[1], graph_view, focus == FocusedPane::Diff);
-            } else if let Some(worktree_view) = worktree_view {
+                draw_branch_list(
+                    frame,
+                    panes[0],
+                    state.display_entries,
+                    state.selected_index,
+                    state.focus == FocusedPane::BranchList,
+                );
+                draw_graph_view(
+                    frame,
+                    panes[1],
+                    graph_view,
+                    state.focus == FocusedPane::Diff,
+                );
+            } else if let Some(worktree_view) = state.worktree_view {
                 let panes = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Length(34), Constraint::Min(1)])
                     .split(area);
-                draw_branch_list(frame, panes[0], display_entries, selected_index, focus == FocusedPane::BranchList);
-                draw_worktree_view(frame, panes[1], worktree_view, focus == FocusedPane::Diff);
+                draw_branch_list(
+                    frame,
+                    panes[0],
+                    state.display_entries,
+                    state.selected_index,
+                    state.focus == FocusedPane::BranchList,
+                );
+                draw_worktree_view(
+                    frame,
+                    panes[1],
+                    worktree_view,
+                    state.focus == FocusedPane::Diff,
+                );
             } else {
-                draw_branch_list(frame, area, display_entries, selected_index, true);
+                draw_branch_list(
+                    frame,
+                    area,
+                    state.display_entries,
+                    state.selected_index,
+                    true,
+                );
             }
         }
     }
@@ -504,27 +532,19 @@ fn format_branch_name(branch_name: &str, width: usize) -> String {
     truncated
 }
 
-fn draw_diff(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    detail_kind: Option<DetailKind>,
-    diff: &BranchDiff,
-    highlighted_diff: Option<&[Line<'static>]>,
-    diff_scroll: usize,
-    diff_view: DiffViewMode,
-    focused: bool,
-    commit_list_overlay: Option<&[String]>,
-    commit_list_selected: Option<usize>,
-    info_overlay: Option<&[String]>,
-) {
-    let title = diff.title.clone().unwrap_or_else(|| match detail_kind {
-        Some(DetailKind::Status) => format!("{} working tree", diff.branch_name),
-        _ => match &diff.base_ref {
-            Some(base_ref) => format!("{} vs {}", diff.branch_name, base_ref),
-            None => diff.branch_name.clone(),
-        },
-    });
-    let title = if diff.ignore_whitespace {
+fn draw_diff(frame: &mut Frame<'_>, area: Rect, state: &DiffState<'_>, focused: bool) {
+    let title = state
+        .diff
+        .title
+        .clone()
+        .unwrap_or_else(|| match state.detail_kind {
+            Some(DetailKind::Status) => format!("{} working tree", state.diff.branch_name),
+            _ => match &state.diff.base_ref {
+                Some(base_ref) => format!("{} vs {}", state.diff.branch_name, base_ref),
+                None => state.diff.branch_name.clone(),
+            },
+        });
+    let title = if state.diff.ignore_whitespace {
         format!("{title} [w]")
     } else {
         title
@@ -539,12 +559,12 @@ fn draw_diff(
             Style::default().fg(Color::DarkGray)
         });
 
-    match diff_view {
+    match state.diff_view {
         DiffViewMode::Unified => {
             let visible_height = area.height.saturating_sub(2) as usize;
-            let lines = match highlighted_diff {
-                Some(lines) => visible_highlighted_lines(lines, diff_scroll, visible_height),
-                None => visible_plain_diff_lines(diff, diff_scroll, visible_height),
+            let lines = match state.highlighted_diff {
+                Some(lines) => visible_highlighted_lines(lines, state.diff_scroll, visible_height),
+                None => visible_plain_diff_lines(state.diff, state.diff_scroll, visible_height),
             };
 
             frame.render_widget(
@@ -563,15 +583,15 @@ fn draw_diff(
                 area.width.saturating_sub(2),
                 area.height.saturating_sub(2),
             );
-            draw_side_by_side_diff(frame, inner, diff, diff_scroll);
+            draw_side_by_side_diff(frame, inner, state.diff, state.diff_scroll);
         }
     }
 
-    if let Some(lines) = commit_list_overlay {
-        draw_commit_list_overlay(frame, area, lines, commit_list_selected.unwrap_or(0));
+    if let Some(lines) = state.commit_list_overlay {
+        draw_commit_list_overlay(frame, area, lines, state.commit_list_selected.unwrap_or(0));
     }
 
-    if let Some(lines) = info_overlay {
+    if let Some(lines) = state.info_overlay {
         draw_info_overlay(frame, area, lines);
     }
 }
@@ -585,7 +605,7 @@ fn draw_commit_list_overlay(
     let overlay_height = (items.len() as u16 + 2)
         .min(area.height.saturating_sub(2))
         .max(3);
-    let overlay_width = area.width.saturating_sub(4).min(72).max(24);
+    let overlay_width = area.width.saturating_sub(4).clamp(24, 72);
     let overlay = Rect::new(area.x + 2, area.y + 1, overlay_width, overlay_height);
     frame.render_widget(Clear, overlay);
 
@@ -728,8 +748,14 @@ fn graph_commit_line(commit: &GraphCommit) -> Line<'static> {
         format!("  [{}]", commit.branch_labels.join(", "))
     };
     Line::from(vec![
-        Span::styled(format!(" {} ", commit.graph), Style::default().fg(Color::Cyan)),
-        Span::styled(format!("{:<8}", commit.short_oid), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!(" {} ", commit.graph),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("{:<8}", commit.short_oid),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::styled(commit.subject.clone(), Style::default().fg(Color::White)),
         Span::styled(labels, Style::default().fg(Color::Green)),
     ])
@@ -948,8 +974,14 @@ fn draw_side_by_side_diff(
         .map(|row| side_by_side_line(&row.right, right_width))
         .collect();
 
-    frame.render_widget(Paragraph::new(left_lines).wrap(Wrap { trim: false }), columns[0]);
-    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), columns[1]);
+    frame.render_widget(
+        Paragraph::new(left_lines).wrap(Wrap { trim: false }),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(right_lines).wrap(Wrap { trim: false }),
+        columns[1],
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -1124,6 +1156,10 @@ fn accent_color(color_scheme: ColorScheme) -> Color {
     match color_scheme {
         ColorScheme::Ocean => Color::Blue,
         ColorScheme::Forest => Color::Green,
+        ColorScheme::Amber => Color::Yellow,
+        ColorScheme::Violet => Color::Magenta,
+        ColorScheme::Rose => Color::Red,
+        ColorScheme::Teal => Color::Cyan,
     }
 }
 
@@ -1213,6 +1249,16 @@ mod tests {
         let popup = centered_rect(40, 20, area);
         assert_eq!(popup.x, 30); // 10 + (80-40)/2
         assert_eq!(popup.y, 15); // 5 + (40-20)/2
+    }
+
+    #[test]
+    fn accent_color_matches_configured_scheme() {
+        assert_eq!(accent_color(ColorScheme::Ocean), Color::Blue);
+        assert_eq!(accent_color(ColorScheme::Forest), Color::Green);
+        assert_eq!(accent_color(ColorScheme::Amber), Color::Yellow);
+        assert_eq!(accent_color(ColorScheme::Violet), Color::Magenta);
+        assert_eq!(accent_color(ColorScheme::Rose), Color::Red);
+        assert_eq!(accent_color(ColorScheme::Teal), Color::Cyan);
     }
 
     // --- branch_entry_item rendering ---

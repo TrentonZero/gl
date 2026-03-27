@@ -1,6 +1,7 @@
 use crate::perf;
 use anyhow::{anyhow, Context, Result};
 use std::{
+    collections::hash_map::Entry,
     collections::HashMap,
     env,
     path::{Path, PathBuf},
@@ -188,7 +189,11 @@ pub fn load_commit_counts(root: &Path, repo: &RepoState) -> Vec<(String, usize)>
         .collect()
 }
 
-pub fn load_branch_diff(root: &Path, branch: &BranchInfo, options: DiffOptions) -> Result<BranchDiff> {
+pub fn load_branch_diff(
+    root: &Path,
+    branch: &BranchInfo,
+    options: DiffOptions,
+) -> Result<BranchDiff> {
     let _timer = perf::ScopeTimer::new(format!("load_branch_diff branch={}", branch.name));
     let base_ref = branch.base_ref.clone();
     let Some(base_ref_name) = base_ref.clone() else {
@@ -275,7 +280,13 @@ pub fn load_commit_diff(
     let _timer = perf::ScopeTimer::new(format!("load_commit_diff commit={}", commit.short_oid));
     let patch = show_command(
         root,
-        &["--format=", "--no-color", "--no-ext-diff", "--find-renames", &commit.oid],
+        &[
+            "--format=",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            &commit.oid,
+        ],
         options.ignore_whitespace,
     )?;
     let stats = show_command(
@@ -298,20 +309,30 @@ pub fn load_commit_diff(
     ))
 }
 
-pub fn load_working_tree_status(root: &Path, branch_name: &str, options: DiffOptions) -> Result<BranchDiff> {
+pub fn load_working_tree_status(
+    root: &Path,
+    branch_name: &str,
+    options: DiffOptions,
+) -> Result<BranchDiff> {
     let _timer = perf::ScopeTimer::new(format!("load_working_tree_status branch={branch_name}"));
     let status_output = git(root, ["status", "--short"])?;
     let status_entries = parse_status_entries(&status_output);
-    let staged_patch =
-        diff_command(root, &["--find-renames", "--cached", "HEAD"], options.ignore_whitespace)?;
+    let staged_patch = diff_command(
+        root,
+        &["--find-renames", "--cached", "HEAD"],
+        options.ignore_whitespace,
+    )?;
     let staged_stats = parse_numstat(&diff_command(
         root,
         &["--cached", "--numstat", "HEAD"],
         options.ignore_whitespace,
     )?);
     let unstaged_patch = diff_command(root, &["--find-renames"], options.ignore_whitespace)?;
-    let unstaged_stats =
-        parse_numstat(&diff_command(root, &["--numstat"], options.ignore_whitespace)?);
+    let unstaged_stats = parse_numstat(&diff_command(
+        root,
+        &["--numstat"],
+        options.ignore_whitespace,
+    )?);
 
     Ok(build_working_tree_diff(
         branch_name,
@@ -350,12 +371,15 @@ pub fn load_commit_graph(root: &Path, repo: &RepoState) -> Result<Vec<GraphCommi
             "--branches",
         ],
     )?;
-    let labels_by_oid: HashMap<_, Vec<_>> = repo.branches.iter().fold(HashMap::new(), |mut acc, branch| {
-        acc.entry(branch.object_id.clone())
-            .or_insert_with(Vec::new)
-            .push(branch.name.clone());
-        acc
-    });
+    let labels_by_oid: HashMap<_, Vec<_>> =
+        repo.branches
+            .iter()
+            .fold(HashMap::new(), |mut acc, branch| {
+                acc.entry(branch.object_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(branch.name.clone());
+                acc
+            });
 
     Ok(output
         .lines()
@@ -386,7 +410,13 @@ pub fn load_worktrees(active_root: &Path) -> Result<Vec<WorktreeInfo>> {
     let common_dir = repo_paths(active_root)?.git_common_dir;
     let output = git_vec(
         &common_dir,
-        &["--git-dir", common_dir.to_str().unwrap_or(".git"), "worktree", "list", "--porcelain"],
+        &[
+            "--git-dir",
+            common_dir.to_str().unwrap_or(".git"),
+            "worktree",
+            "list",
+            "--porcelain",
+        ],
     )?;
     Ok(parse_worktree_list(&output, active_root))
 }
@@ -738,7 +768,7 @@ pub(crate) fn parse_diff(
         if let Some(rest) = line.strip_prefix("diff --git a/") {
             let path = rest.split(" b/").next().unwrap_or(rest).trim().to_string();
             current_path = Some(path.clone());
-            if !emitted_files.contains_key(&path) {
+            if let Entry::Vacant(entry) = emitted_files.entry(path.clone()) {
                 let (added, removed) = stat_map
                     .get(&path)
                     .cloned()
@@ -749,7 +779,7 @@ pub(crate) fn parse_diff(
                     text: format!("── {path} ── +{added} -{removed}"),
                     file_path: Some(path.clone()),
                 });
-                emitted_files.insert(path, true);
+                entry.insert(true);
             }
             continue;
         }
@@ -872,6 +902,25 @@ fn run_git_command(root: &Path, args: &[&str]) -> Result<Output> {
 
     Err(anyhow!("failed to find git executable"))
         .with_context(|| format!("failed to run git {:?}", args))
+}
+
+fn discover_repo_root(start: &Path) -> Result<PathBuf> {
+    let output = run_git_command(start, &["rev-parse", "--show-toplevel"])
+        .context("failed to run git rev-parse --show-toplevel")?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to discover git repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return Err(anyhow!("git rev-parse returned an empty repository path"));
+    }
+
+    Ok(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -1013,7 +1062,14 @@ index 0000000..ce01362
         let mut stats = HashMap::new();
         stats.insert("hello.txt".to_string(), ("2".to_string(), "0".to_string()));
 
-        let diff = parse_diff("feat".into(), Some("main".into()), None, false, patch, &stats);
+        let diff = parse_diff(
+            "feat".into(),
+            Some("main".into()),
+            None,
+            false,
+            patch,
+            &stats,
+        );
         assert_eq!(diff.branch_name, "feat");
         assert_eq!(diff.file_positions, vec![0]);
 
@@ -1077,7 +1133,14 @@ index 3333..4444 100644
 -foo
 +bar";
         let stats = HashMap::new();
-        let diff = parse_diff("multi".into(), Some("main".into()), None, false, patch, &stats);
+        let diff = parse_diff(
+            "multi".into(),
+            Some("main".into()),
+            None,
+            false,
+            patch,
+            &stats,
+        );
         assert_eq!(diff.file_positions.len(), 2);
         assert_eq!(diff.lines[diff.file_positions[0]].kind, DiffLineKind::File);
         assert!(diff.lines[diff.file_positions[0]].text.contains("a.txt"));
@@ -1162,15 +1225,8 @@ index 1111..2222 100644
 
     #[test]
     fn build_working_tree_diff_reports_clean_tree() {
-        let diff = build_working_tree_diff(
-            "main",
-            false,
-            &[],
-            "",
-            &HashMap::new(),
-            "",
-            &HashMap::new(),
-        );
+        let diff =
+            build_working_tree_diff("main", false, &[], "", &HashMap::new(), "", &HashMap::new());
         assert_eq!(diff.base_ref.as_deref(), Some("working tree"));
         assert_eq!(diff.lines.len(), 1);
         assert!(diff.lines[0].text.contains("clean"));
@@ -1345,7 +1401,10 @@ index 1111..2222 100644
     #[test]
     fn open_repo_rejects_bare_repositories() {
         let repo_root = unique_temp_dir("bare-repo");
-        run_git(Path::new(std::env::temp_dir().as_path()), &["init", "--bare", repo_root.to_str().unwrap()]);
+        run_git(
+            Path::new(std::env::temp_dir().as_path()),
+            &["init", "--bare", repo_root.to_str().unwrap()],
+        );
 
         let error = open_repo(Some(repo_root.clone())).unwrap_err().to_string();
         assert!(error.contains("bare repositories are not supported"));
@@ -1371,7 +1430,9 @@ index 1111..2222 100644
         let repo = refresh_repo(&repo_root).unwrap();
         let graph = load_commit_graph(&repo_root, &repo).unwrap();
         assert!(!graph.is_empty());
-        assert!(graph.iter().any(|commit| commit.branch_labels.iter().any(|label| label == "feature")));
+        assert!(graph
+            .iter()
+            .any(|commit| commit.branch_labels.iter().any(|label| label == "feature")));
         assert!(graph
             .iter()
             .any(|commit| commit.primary_branch.as_deref() == Some("feature")));
@@ -1395,23 +1456,4 @@ index 1111..2222 100644
         assert!(worktrees[0].is_active);
         assert_eq!(worktrees[1].branch.as_deref(), Some("feature"));
     }
-}
-
-fn discover_repo_root(start: &Path) -> Result<PathBuf> {
-    let output = run_git_command(start, &["rev-parse", "--show-toplevel"])
-        .context("failed to run git rev-parse --show-toplevel")?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "failed to discover git repository: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        return Err(anyhow!("git rev-parse returned an empty repository path"));
-    }
-
-    Ok(PathBuf::from(path))
 }

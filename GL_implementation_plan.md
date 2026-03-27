@@ -34,8 +34,10 @@ Implemented today:
 - refresh repo state manually with `R`
 - run `:q`, `:branch <name>`, and `:search <term>` from a command overlay
 - support `--help`, `--version`, and a positional repo path
-- read `chrome`, `diff_view`, `ignore_whitespace`, `color_scheme`, `keybindings`, and `worktree_path_defaults` from `~/.config/gl/config.toml`
+- read `chrome`, `diff_view`, `ignore_whitespace`, multiple built-in `color_scheme` values, `keybindings`, and `worktree_path_defaults` from `~/.config/gl/config.toml`
 - emit optional profiling logs via `GL_PROFILE`
+- provide a sibling Homebrew tap repository with a `gl` formula for `brew install --HEAD`
+- keep `cargo build`, `cargo test`, and `cargo clippy --all-targets` warning-free
 
 ## Phase Status
 
@@ -201,11 +203,22 @@ Delivered:
 
 - positional repo path argument
 - `--help` and `--version`
+- `--color-scheme <scheme>` CLI override for one-off accent selection
 - `:` command overlay with `:q`, `:branch <name>`, and `:search <term>`
-- config support for keybinding overrides, color scheme selection, diff defaults, and worktree path defaults
+- config support for keybinding overrides, multiple built-in color schemes, diff defaults, and worktree path defaults
 - bare-repo rejection with a direct working-tree-oriented error message
 - decent empty/error handling for common repo inspection failures
 - profiling hooks for performance investigation
+
+### Phase 13: Homebrew Packaging
+
+**Status:** Complete
+
+Delivered:
+
+- sibling Homebrew tap repository at `../homebrew-gl`
+- `brew tap TrentonZero/gl /Users/kwalker/git/homebrew-gl && brew install --HEAD TrentonZero/gl/gl` install path
+- formula test coverage for `gl --version` and `gl --help`
 
 ---
 

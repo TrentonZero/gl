@@ -564,6 +564,18 @@ pub(crate) fn strip_ansi(input: &str) -> String {
     result
 }
 
+fn git_output(root: &Path, args: &[&str]) -> Result<String, ()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,16 +1048,4 @@ mod tests {
             std::env::remove_var("PATH");
         }
     }
-}
-
-fn git_output(root: &Path, args: &[&str]) -> Result<String, ()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|_| ())?;
-    if !output.status.success() {
-        return Err(());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
