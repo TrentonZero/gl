@@ -23,6 +23,46 @@ If you find that useful, feel free to check it out. If you don't, that's fine to
 
 If something is broken, feel free to report an issue, but I don't promise any great level of responsiveness: this is a vibe project, which makes it one level lower on my priority list than a hobby project.
 
+## Current Features
+
+- Local branch list with:
+  - current branch indicator
+  - ahead/behind tracking status
+  - async commit-count enrichment
+  - Graphite stack grouping and stale-branch markers when `gt` is available
+- Branch detail view with:
+  - combined branch diff against upstream, detected trunk, or Graphite parent
+  - syntax-highlighted diff rendering via `syntect`
+  - file-header jump navigation
+  - in-diff search with `n` and `N`
+  - unified or side-by-side layout toggled with `v`
+  - whitespace-insensitive reload toggled with `w`
+  - background preload of branch diffs and highlighted output after first paint
+- Debounced automatic refresh when repository files, refs, `HEAD`, or the index change
+- Status view for the checked-out branch with:
+  - working tree summary counts for staged, unstaged, and untracked files
+  - staged and unstaged combined diffs in the existing review pane
+  - untracked-file listing in the same jumpable file roster
+- Stack view with:
+  - selected-branch parent/child/base summary
+  - ordered stack branch roster with stale and tracking indicators
+- Graph view with:
+  - first-parent local commit history for all local branches
+  - branch-head labels in the graph list
+  - `Enter` to open the owning branch in branch detail
+- Worktree manager with:
+  - clean/dirty worktree status and checked-out branch
+  - branch-list worktree tags
+  - active-context switching with `Enter`
+- Command overlay with `:q`, `:branch <name>`, and `:search <term>`
+- Manual refresh with `R` as a fallback when filesystem watching is unavailable
+- Optional top and bottom chrome via `~/.config/gl/config.toml`
+- File-backed application logs for normal runs, with optional profiling when `GL_PROFILE=1`
+
+## What Is Not Implemented Yet
+
+The repository still contains broader design docs for mutation workflows such as commit, rebase, push, and worktree creation. Those are not implemented in the current binary.
+
 
 
 ## Prerequisites
@@ -55,7 +95,7 @@ cargo install --path .
 Or install from the sibling Homebrew tap repository:
 
 ```sh
-brew tap TrentonZero/gl
+brew tap TrentonZero/gl /Users/kwalker/git/homebrew-gl
 brew install --HEAD TrentonZero/gl/gl
 ```
 
@@ -136,6 +176,8 @@ Diff pane:
 Config path:
 
 ```sh
+$XDG_CONFIG_HOME/gl/config.toml
+# or, when XDG_CONFIG_HOME is unset:
 ~/.config/gl/config.toml
 ```
 
@@ -146,7 +188,6 @@ chrome = true
 diff_view = "unified"
 ignore_whitespace = false
 color_scheme = "ocean"
-worktree_path_defaults = ["~/src/worktrees"]
 
 [keybindings]
 quit = "q"
@@ -160,6 +201,8 @@ graph_view = "4"
 
 Set `chrome = false` to hide the top status bar and bottom help bar. Set `diff_view = "side-by-side"` or `ignore_whitespace = true` to start in those diff modes. `color_scheme` supports `ocean`, `forest`, `amber`, `violet`, `rose`, and `teal` for the accent color, `gl --color-scheme <scheme>` overrides that value for a single launch, and `[keybindings]` lets you remap the supported global shortcuts.
 
-## Profiling
+## Logging
 
-Set `GL_PROFILE=1` to emit simple timing logs to stderr for startup, refresh, stack detection, diff loading, and syntax highlighting.
+GL now writes logs to `GL_LOG_PATH` when set, otherwise to `$XDG_STATE_HOME/gl/gl.log`, then `~/.local/state/gl/gl.log`, and finally the system temp directory as a fallback.
+
+Set `GL_PROFILE=1` to include timing logs for startup, refresh, stack detection, diff loading, and syntax highlighting in that same log file. Set `GL_LOG_STDERR=1` if you also want logs mirrored to stderr.
