@@ -1,5 +1,5 @@
 use crate::{
-    config::{AppConfig, ColorScheme, DiffViewMode},
+    config::{AppConfig, ColorScheme, DiffViewMode, KeyBindings},
     git::{BranchDiff, DetailKind, DiffLineKind, GraphCommit, RepoState, WorktreeInfo},
 };
 use ratatui::{
@@ -153,6 +153,7 @@ pub fn draw(frame: &mut Frame<'_>, state: DrawState<'_>) {
         draw_help_bar(
             frame,
             areas[2],
+            state.config,
             state.stack_view.is_some(),
             state.detail_kind,
             state.focus,
@@ -182,7 +183,7 @@ pub fn draw(frame: &mut Frame<'_>, state: DrawState<'_>) {
     draw_body(frame, areas[1], &body_state);
 
     if state.show_help {
-        draw_help_overlay(frame, frame_area);
+        draw_help_overlay(frame, frame_area, state.config);
     }
 
     if let Some(command_input) = state.command_input {
@@ -226,17 +227,26 @@ fn draw_status_bar(
 fn draw_help_bar(
     frame: &mut Frame<'_>,
     area: Rect,
+    config: &AppConfig,
     stack_view_open: bool,
     detail_kind: Option<DetailKind>,
     focus: FocusedPane,
     search: Option<&str>,
     notice: Option<&str>,
 ) {
-    let line = help_bar_line(stack_view_open, detail_kind, focus, search, notice);
+    let line = help_bar_line(
+        &config.keybindings,
+        stack_view_open,
+        detail_kind,
+        focus,
+        search,
+        notice,
+    );
     frame.render_widget(Paragraph::new(line), area);
 }
 
 fn help_bar_line(
+    keybindings: &KeyBindings,
     stack_view_open: bool,
     detail_kind: Option<DetailKind>,
     focus: FocusedPane,
@@ -245,21 +255,15 @@ fn help_bar_line(
 ) -> Line<'static> {
     let hints = if detail_kind.is_some() {
         match (detail_kind, focus) {
-            (_, FocusedPane::BranchList) => {
-                "j/k move  J/K stacks  h/l fold  Enter open  S status  Esc close  q quit  ? help"
-            }
-            (Some(DetailKind::BranchDiff), FocusedPane::Diff) => {
-                "j/k scroll  J/K files  Tab commits  v view  w whitespace  Enter open commit  Backspace branch  i info  / search  Esc list"
-            }
-            (Some(DetailKind::Status), FocusedPane::Diff) => {
-                "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  v view  w whitespace  / search  n/N next  Esc list"
-            }
-            _ => ""
+            (_, FocusedPane::BranchList) => branch_list_detail_help(keybindings),
+            (Some(DetailKind::BranchDiff), FocusedPane::Diff) => branch_diff_help(),
+            (Some(DetailKind::Status), FocusedPane::Diff) => status_diff_help(),
+            _ => String::new(),
         }
     } else if stack_view_open {
-        "j/k move  J/K stacks  h/l fold  Enter open diff  s stack  Esc close  R refresh  q quit"
+        stack_view_help(keybindings)
     } else {
-        "j/k move  J/K stacks  h/l fold  Enter open  S status  s stack  R refresh  q quit  ? help"
+        branch_list_help(keybindings)
     };
 
     let mut line = Line::from(Span::styled(hints, Style::default().fg(Color::Gray)));
@@ -280,6 +284,79 @@ fn help_bar_line(
     }
 
     line
+}
+
+fn branch_list_help(keybindings: &KeyBindings) -> String {
+    format!(
+        "j/k move  J/K stacks  h/l fold  Enter open  {} status  {} stack  {} refresh  {} quit  {} help",
+        keybindings.status_view,
+        keybindings.stack_view,
+        keybindings.refresh,
+        keybindings.quit,
+        keybindings.help,
+    )
+}
+
+fn branch_list_detail_help(keybindings: &KeyBindings) -> String {
+    format!(
+        "j/k move  J/K stacks  h/l fold  Enter open  {} status  Esc close  {} quit  {} help",
+        keybindings.status_view,
+        keybindings.quit,
+        keybindings.help,
+    )
+}
+
+fn stack_view_help(keybindings: &KeyBindings) -> String {
+    format!(
+        "j/k move  J/K stacks  h/l fold  Enter open diff  {} stack  Esc close  {} refresh  {} quit",
+        keybindings.stack_view,
+        keybindings.refresh,
+        keybindings.quit,
+    )
+}
+
+fn branch_diff_help() -> String {
+    "j/k scroll  J/K files  Tab commits  v view  w whitespace  Enter open commit  Backspace branch  i info  / search  Esc list".to_string()
+}
+
+fn status_diff_help() -> String {
+    "j/k scroll  J/K files  gg/G ends  Ctrl-d/u page  v view  w whitespace  / search  n/N next  Esc list".to_string()
+}
+
+fn help_overlay_lines(keybindings: &KeyBindings) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "GL Help",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!(
+            "Global: {} quit, {} toggle help, {} refresh, {} graph, 3/w worktrees, {} command",
+            keybindings.quit,
+            keybindings.help,
+            keybindings.refresh,
+            keybindings.graph_view,
+            keybindings.command,
+        )),
+        Line::from(format!(
+            "Branches: j/k move, J/K jump stacks, h/l fold or unfold, {} stack",
+            keybindings.stack_view,
+        )),
+        Line::from(format!(
+            "          Ctrl-d/u half-page, Enter open branch, {} status",
+            keybindings.status_view,
+        )),
+        Line::from("Stack view: Esc back to list, Enter open selected diff"),
+        Line::from("Branch detail: Tab commits, Enter commit diff, Backspace branch diff"),
+        Line::from("Branch detail: i info overlay, any key dismisses"),
+        Line::from("Status detail: Tab focus diff/list, Esc back to list"),
+        Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G, J/K file jumps, v view, w whitespace"),
+        Line::from("Search: / start, Enter apply, n/N next or previous"),
+        Line::from(""),
+        Line::from("Stack groups shown when Graphite CLI (gt) is available."),
+    ]
 }
 
 fn draw_body(frame: &mut Frame<'_>, area: Rect, state: &BodyState<'_>) {
@@ -1119,30 +1196,11 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     truncated
 }
 
-fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
+fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect, config: &AppConfig) {
     let popup = centered_rect(72, 18, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "GL Help",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("Global: q quit, ? toggle help, R refresh"),
-            Line::from("Branches: j/k move, J/K jump stacks, h/l fold or unfold, s stack"),
-            Line::from("          Ctrl-d/u half-page, Enter open branch, S status"),
-            Line::from("Stack view: Esc back to list, Enter open selected diff"),
-            Line::from("Branch detail: Tab commits, Enter commit diff, Backspace branch diff"),
-            Line::from("Branch detail: i info overlay, any key dismisses"),
-            Line::from("Status detail: Tab focus diff/list, Esc back to list"),
-            Line::from("Diff scroll: j/k, Ctrl-d/u, gg/G, J/K file jumps, v view, w whitespace"),
-            Line::from("Search: / start, Enter apply, n/N next or previous"),
-            Line::from(""),
-            Line::from("Stack groups shown when Graphite CLI (gt) is available."),
-        ])
+        Paragraph::new(help_overlay_lines(&config.keybindings))
         .block(Block::default().title("Help").borders(Borders::ALL))
         .alignment(Alignment::Left)
         .wrap(Wrap { trim: false }),
@@ -1462,6 +1520,7 @@ mod tests {
     #[test]
     fn help_bar_shows_non_blocking_notice() {
         let line = help_bar_line(
+            &AppConfig::default().keybindings,
             false,
             None,
             FocusedPane::BranchList,
@@ -1479,7 +1538,14 @@ mod tests {
 
     #[test]
     fn help_bar_shows_stack_view_hints() {
-        let line = help_bar_line(true, None, FocusedPane::BranchList, None, None);
+        let line = help_bar_line(
+            &AppConfig::default().keybindings,
+            true,
+            None,
+            FocusedPane::BranchList,
+            None,
+            None,
+        );
         let text: String = line
             .spans
             .iter()
@@ -1492,7 +1558,14 @@ mod tests {
 
     #[test]
     fn help_bar_shows_status_shortcut_in_branch_list() {
-        let line = help_bar_line(false, None, FocusedPane::BranchList, None, None);
+        let line = help_bar_line(
+            &AppConfig::default().keybindings,
+            false,
+            None,
+            FocusedPane::BranchList,
+            None,
+            None,
+        );
         let text: String = line
             .spans
             .iter()
@@ -1505,6 +1578,7 @@ mod tests {
     #[test]
     fn help_bar_shows_diff_view_and_whitespace_hints() {
         let line = help_bar_line(
+            &AppConfig::default().keybindings,
             false,
             Some(DetailKind::BranchDiff),
             FocusedPane::Diff,
@@ -1518,6 +1592,55 @@ mod tests {
             .collect();
         assert!(text.contains("v view"));
         assert!(text.contains("w whitespace"));
+    }
+
+    #[test]
+    fn help_bar_uses_remapped_keybindings() {
+        let keybindings = KeyBindings {
+            quit: 'x',
+            help: 'H',
+            refresh: 'r',
+            command: ';',
+            stack_view: 't',
+            status_view: 'z',
+            graph_view: '9',
+        };
+        let line = help_bar_line(&keybindings, false, None, FocusedPane::BranchList, None, None);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("z status"));
+        assert!(text.contains("t stack"));
+        assert!(text.contains("r refresh"));
+        assert!(text.contains("x quit"));
+        assert!(text.contains("H help"));
+    }
+
+    #[test]
+    fn help_overlay_uses_remapped_keybindings() {
+        let keybindings = KeyBindings {
+            quit: 'x',
+            help: 'H',
+            refresh: 'r',
+            command: ';',
+            stack_view: 't',
+            status_view: 'z',
+            graph_view: '9',
+        };
+        let text: String = help_overlay_lines(&keybindings)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .collect();
+        assert!(text.contains("x quit"));
+        assert!(text.contains("H toggle help"));
+        assert!(text.contains("r refresh"));
+        assert!(text.contains("9 graph"));
+        assert!(text.contains("; command"));
+        assert!(text.contains("t stack"));
+        assert!(text.contains("z status"));
     }
 
     #[test]
