@@ -41,6 +41,7 @@ Current implementation notes:
 - Stack structure is cached on disk.
 - Stale branches are computed asynchronously by comparing each branch-parent merge-base to the parent tip.
 - If Graphite data is unavailable, GL shows a non-blocking notice and falls back to inferred local stack relationships when possible.
+- Repo and git metadata changes trigger a debounced automatic refresh; if watcher setup fails, GL shows a non-blocking manual-refresh fallback notice.
 
 ### Local Only
 

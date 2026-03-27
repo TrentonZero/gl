@@ -22,6 +22,7 @@ Today the app is focused on one core workflow:
   - file-header jump navigation
   - in-diff search with `n` and `N`
   - background preload of branch diffs and highlighted output after first paint
+- Debounced automatic refresh when repository files, refs, `HEAD`, or the index change
 - Status view for the checked-out branch with:
   - working tree summary counts for staged, unstaged, and untracked files
   - staged and unstaged combined diffs in the existing review pane
@@ -29,7 +30,7 @@ Today the app is focused on one core workflow:
 - Stack view with:
   - selected-branch parent/child/base summary
   - ordered stack branch roster with stale and tracking indicators
-- Manual refresh with `R`
+- Manual refresh with `R` as a fallback when filesystem watching is unavailable
 - Optional top and bottom chrome via `~/.config/gl/config.toml`
 - Lightweight profiling logs when `GL_PROFILE=1`
 

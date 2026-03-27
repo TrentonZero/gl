@@ -4,6 +4,7 @@ mod perf;
 mod stack;
 mod syntax;
 mod ui;
+mod watch;
 
 use anyhow::{Context, Result};
 use config::AppConfig;
@@ -29,6 +30,7 @@ use std::{
 };
 use syntax::SyntaxHighlighter;
 use ui::{draw, BranchEntry, FocusedPane, StackView, StackViewBranch};
+use watch::{start_repo_watcher, RepoWatcher, WatchMessage};
 
 #[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -121,14 +123,39 @@ struct App {
     diff_preload_failures: HashMap<String, String>,
     pending_diff_preloads: HashSet<String>,
     branch_detail: Option<BranchDetailState>,
+    _watch_event_tx: Sender<WatchMessage>,
+    watch_event_rx: Receiver<WatchMessage>,
+    _repo_watcher: Option<RepoWatcher>,
+    watch_notice: Option<String>,
 }
 
 impl App {
     fn new(config: AppConfig, repo: RepoState, stack_info: StackInfo) -> Self {
+        Self::new_with_watcher(config, repo, stack_info, true)
+    }
+
+    fn new_with_watcher(
+        config: AppConfig,
+        repo: RepoState,
+        stack_info: StackInfo,
+        start_watcher: bool,
+    ) -> Self {
         let display_entries = build_display_entries(&repo, &stack_info);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
+        let (watch_event_tx, watch_event_rx) = mpsc::channel();
+        let (repo_watcher, watch_notice) = if start_watcher {
+            match start_repo_watcher(&repo.root, watch_event_tx.clone()) {
+                Ok(watcher) => (Some(watcher), None),
+                Err(error) => (
+                    None,
+                    Some(format!("Filesystem watching unavailable; use R to refresh ({error})")),
+                ),
+            }
+        } else {
+            (None, None)
+        };
         let mut app = Self {
             config,
             repo,
@@ -160,10 +187,19 @@ impl App {
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: HashSet::new(),
             branch_detail: None,
+            _watch_event_tx: watch_event_tx,
+            watch_event_rx,
+            _repo_watcher: repo_watcher,
+            watch_notice,
         };
         app.reload_stack_decorations_async();
         app.reload_commit_counts_async();
         app
+    }
+
+    #[cfg(test)]
+    fn new_for_test(config: AppConfig, repo: RepoState, stack_info: StackInfo) -> Self {
+        Self::new_with_watcher(config, repo, stack_info, false)
     }
 
     fn run(&mut self) -> Result<()> {
@@ -185,6 +221,9 @@ impl App {
         let mut needs_redraw = true;
         let mut first_draw_logged = false;
         loop {
+            if self.apply_pending_watch_events()? {
+                needs_redraw = true;
+            }
             if self.apply_pending_stack_updates() {
                 needs_redraw = true;
             }
@@ -225,7 +264,7 @@ impl App {
                         } else {
                             None
                         },
-                        stack_notice(&self.stack_info),
+                        self.current_notice(),
                     );
                 })?;
                 if !first_draw_logged {
@@ -652,6 +691,22 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn apply_pending_watch_events(&mut self) -> Result<bool> {
+        let mut refresh_requested = false;
+        while let Ok(message) = self.watch_event_rx.try_recv() {
+            if message == WatchMessage::RefreshRequested {
+                refresh_requested = true;
+            }
+        }
+
+        if !refresh_requested {
+            return Ok(false);
+        }
+
+        self.refresh_repo()?;
+        Ok(true)
     }
 
     fn reload_stack_decorations_async(&mut self) {
@@ -1184,6 +1239,12 @@ impl App {
         }
         false
     }
+
+    fn current_notice(&self) -> Option<&str> {
+        self.watch_notice
+            .as_deref()
+            .or_else(|| stack_notice(&self.stack_info))
+    }
 }
 
 fn load_initial_stack_info(repo: &RepoState) -> StackInfo {
@@ -1604,7 +1665,7 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let mut app = App::new(AppConfig::default(), repo, stack_info.clone());
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info.clone());
         let before: Vec<_> = app
             .display_entries
             .iter()
@@ -1669,7 +1730,7 @@ mod tests {
         runtime_repo.branches[0].is_head = true;
 
         let startup_stack_info = load_initial_stack_info(&runtime_repo);
-        let app = App::new(AppConfig::default(), runtime_repo, startup_stack_info);
+        let app = App::new_for_test(AppConfig::default(), runtime_repo, startup_stack_info);
         let labels_and_branches: Vec<_> = app
             .display_entries
             .iter()
@@ -1760,6 +1821,7 @@ mod tests {
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
+        let (watch_event_tx, watch_event_rx) = mpsc::channel();
         let mut repo = make_repo_at(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             &["a1", "a2", "b1", "main"],
@@ -1796,6 +1858,10 @@ mod tests {
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: std::collections::HashSet::new(),
             branch_detail: None,
+            _watch_event_tx: watch_event_tx,
+            watch_event_rx,
+            _repo_watcher: None,
+            watch_notice: None,
         }
     }
 
@@ -1939,7 +2005,7 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         };
-        let mut app = App::new(AppConfig::default(), repo, stack_info);
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
         app.jump_to_first_branch();
 
         app.toggle_stack_view();
@@ -2048,7 +2114,7 @@ mod tests {
     #[test]
     fn open_selected_branch_uses_preloaded_diff_without_git_roundtrip() {
         let (repo_root, repo) = make_commit_breakdown_repo();
-        let mut app = App::new(AppConfig::default(), repo, empty_stacks());
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
         app.selected_index = app
             .display_entries
             .iter()
@@ -2096,7 +2162,7 @@ mod tests {
     #[test]
     fn branch_detail_commit_breakdown_opens_commit_diff_and_restores_branch_diff() {
         let (repo_root, repo) = make_commit_breakdown_repo();
-        let mut app = App::new(AppConfig::default(), repo, empty_stacks());
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
         app.selected_index = app
             .display_entries
             .iter()
@@ -2147,7 +2213,7 @@ mod tests {
     #[test]
     fn branch_detail_info_overlay_dismisses_on_next_key() {
         let (repo_root, repo) = make_commit_breakdown_repo();
-        let mut app = App::new(AppConfig::default(), repo, empty_stacks());
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
         app.selected_index = app
             .display_entries
             .iter()
@@ -2206,5 +2272,46 @@ mod tests {
 
         assert_eq!(app.detail_kind, Some(DetailKind::Status));
         assert!(!app.show_stack_view);
+    }
+
+    #[test]
+    fn filesystem_refresh_updates_open_status_view_after_worktree_change() {
+        let repo_root = unique_temp_dir("watch-refresh");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "main")
+            .unwrap();
+        app.open_selected_status().unwrap();
+        assert!(app
+            .branch_diff
+            .as_ref()
+            .is_some_and(|diff| diff.lines.iter().any(|line| line.text.contains("clean"))));
+
+        fs::write(repo_root.join("notes.txt"), "base\nchanged\n").unwrap();
+        app._watch_event_tx
+            .send(WatchMessage::RefreshRequested)
+            .unwrap();
+
+        assert!(app.apply_pending_watch_events().unwrap());
+        assert!(app.branch_diff.as_ref().is_some_and(|diff| {
+            diff.lines
+                .iter()
+                .any(|line| line.text.contains("0 staged, 1 unstaged, 0 untracked"))
+                && diff.lines.iter().any(|line| line.text.contains("notes.txt"))
+        }));
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 }
