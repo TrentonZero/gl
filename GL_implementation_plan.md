@@ -44,7 +44,13 @@ Completed:
 
 ## Phase 2: Remove Or Implement Dead Config Surface
 
-**Status:** In Progress
+**Status:** Complete
+
+Completed:
+
+- Removed the unused `worktree_path_defaults` config field from runtime config parsing.
+- Removed the startup no-op read that kept the dead setting alive.
+- Updated tests and README config examples so the documented config surface matches the implemented one.
 
 **Goal:** Eliminate misleading configuration that is documented but not functional.
 
@@ -68,6 +74,14 @@ Completed:
 
 ## Phase 3: XDG-Compliant Config Resolution
 
+**Status:** Complete
+
+Completed:
+
+- Config loading now prefers `$XDG_CONFIG_HOME/gl/config.toml` and falls back to `~/.config/gl/config.toml`.
+- Added focused tests for XDG precedence, HOME fallback, and missing-environment behavior.
+- Updated README config-path documentation to describe the actual lookup order.
+
 **Goal:** Make config discovery consistent with the rest of the app's filesystem conventions.
 
 **Tasks:**
@@ -85,6 +99,14 @@ Completed:
 ---
 
 ## Phase 4: Structural Refactor Of App Runtime
+
+**Status:** Complete
+
+Completed:
+
+- Moved CLI parsing and help text into `src/cli.rs`.
+- Moved stack/display view-model helpers into `src/view_state.rs` with local tests.
+- Reduced `src/main.rs` by moving cohesive responsibilities into dedicated modules while preserving current behavior.
 
 **Goal:** Reduce maintenance risk by splitting large, mixed-responsibility runtime code into smaller modules.
 
@@ -106,6 +128,14 @@ Completed:
 ---
 
 ## Phase 5: Final Cleanup Pass
+
+**Status:** Complete
+
+Completed:
+
+- Removed residual dead-code allowances in `src/stack.rs` that were no longer needed.
+- Revalidated the codebase with clean `cargo build` and `cargo test` runs after the refactor.
+- Updated this plan to reflect the completed cleanup phases.
 
 **Goal:** Close out residual cleanup debt introduced or exposed by earlier phases.
 

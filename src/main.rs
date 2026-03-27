@@ -1,3 +1,4 @@
+mod cli;
 mod config;
 mod git;
 mod logger;
@@ -5,10 +6,12 @@ mod perf;
 mod stack;
 mod syntax;
 mod ui;
+mod view_state;
 mod watch;
 
 use anyhow::{Context, Result};
-use config::{AppConfig, ColorScheme, DiffViewMode};
+use cli::{parse_cli_args, print_help};
+use config::{AppConfig, DiffViewMode};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -24,14 +27,17 @@ use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
 use std::{
     collections::{HashMap, HashSet},
     env, io, mem,
-    path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
 use ui::{
-    draw, BranchEntry, DrawState, FocusedPane, GraphView, StackView, StackViewBranch, WorktreeView,
+    draw, BranchEntry, DrawState, FocusedPane, GraphView, StackView, WorktreeView,
+};
+use view_state::{
+    branch_for_diff, build_display_entries, build_stack_view, diff_preload_targets,
+    initial_expanded_stacks, ordered_branch_names, stack_contains_head, stack_name_for_branch,
 };
 use watch::{start_repo_watcher, RepoWatcher, WatchMessage};
 
@@ -76,91 +82,6 @@ fn main() -> Result<()> {
         App::new(config, repo, stack_info)
     };
     app.run()
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct CliArgs {
-    repo_path: Option<PathBuf>,
-    show_help: bool,
-    show_version: bool,
-    color_scheme: Option<ColorScheme>,
-}
-
-fn parse_cli_args(args: Vec<String>) -> Result<CliArgs> {
-    let mut cli = CliArgs::default();
-    let mut positional = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--help" | "-h" => cli.show_help = true,
-            "--version" | "-V" => cli.show_version = true,
-            "--color-scheme" => {
-                let Some(value) = args.next() else {
-                    anyhow::bail!(
-                        "missing value for --color-scheme; supported values: {}",
-                        supported_color_schemes()
-                    );
-                };
-                cli.color_scheme = Some(parse_color_scheme_arg(&value)?);
-            }
-            _ if arg.starts_with("--color-scheme=") => {
-                let value = arg.trim_start_matches("--color-scheme=");
-                cli.color_scheme = Some(parse_color_scheme_arg(value)?);
-            }
-            _ if arg.starts_with('-') => anyhow::bail!("unknown argument `{arg}`; try `gl --help`"),
-            _ => positional.push(arg),
-        }
-    }
-    if positional.len() > 1 {
-        anyhow::bail!("expected at most one repository path; try `gl --help`");
-    }
-    cli.repo_path = positional.into_iter().next().map(PathBuf::from);
-    Ok(cli)
-}
-
-fn print_help() {
-    println!("{}", help_text());
-}
-
-fn help_text() -> String {
-    format!(
-        "\
-gl {version}
-
-USAGE:
-  gl
-  gl <path>
-  gl --color-scheme <scheme>
-  gl --help
-  gl --version
-
-OPTIONS:
-  -h, --help       Show this help output
-  -V, --version    Show the application version
-      --color-scheme <scheme>
-                   Override the configured accent color
-                   Supported: {schemes}
-",
-        version = env!("CARGO_PKG_VERSION"),
-        schemes = supported_color_schemes()
-    )
-}
-
-fn parse_color_scheme_arg(value: &str) -> Result<ColorScheme> {
-    ColorScheme::parse(value).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown color scheme `{value}`; supported values: {}",
-            supported_color_schemes()
-        )
-    })
-}
-
-fn supported_color_schemes() -> String {
-    ColorScheme::ALL
-        .iter()
-        .map(|scheme| scheme.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 struct StackLoadResult {
@@ -263,7 +184,6 @@ impl App {
         stack_info: StackInfo,
         start_watcher: bool,
     ) -> Self {
-        let _ = &config.worktree_path_defaults;
         let diff_view = config.diff_view;
         let ignore_whitespace = config.ignore_whitespace;
         let worktrees = load_worktrees(&repo.root).unwrap_or_default();
@@ -2037,79 +1957,6 @@ fn stack_notice(stack_info: &StackInfo) -> Option<&'static str> {
     }
 }
 
-fn build_stack_view(
-    repo: &RepoState,
-    stack_info: &StackInfo,
-    branch_name: &str,
-) -> Option<StackView> {
-    let stack = stack_info.stack_for_branch(branch_name)?;
-    let branch_map: std::collections::HashMap<_, _> = repo
-        .branches
-        .iter()
-        .map(|branch| (branch.name.clone(), branch))
-        .collect();
-    let selected_index = stack.branches.iter().position(|name| name == branch_name)?;
-    let diff_branch = branch_for_diff(repo, stack_info, branch_name)?;
-    let parent_branch = if selected_index > 0 {
-        Some(stack.branches[selected_index - 1].clone())
-    } else {
-        diff_branch.base_ref.clone()
-    };
-    let child_branch = stack.branches.get(selected_index + 1).cloned();
-
-    let branches = stack
-        .branches
-        .iter()
-        .filter_map(|name| {
-            let branch = branch_map.get(name.as_str())?;
-            Some(StackViewBranch {
-                name: name.clone(),
-                is_selected: name == branch_name,
-                is_head: branch.is_head,
-                commit_count: branch.commit_count,
-                ahead: branch.ahead,
-                behind: branch.behind,
-                has_upstream: branch.upstream.is_some(),
-                stale: stack_info.is_stale(name),
-            })
-        })
-        .collect();
-
-    Some(StackView {
-        title: stack.name.clone(),
-        selected_branch: branch_name.to_string(),
-        parent_branch,
-        child_branch,
-        base_ref: diff_branch.base_ref,
-        stale: stack_info.is_stale(branch_name),
-        branches,
-    })
-}
-
-fn diff_preload_targets(
-    repo: &RepoState,
-    stack_info: &StackInfo,
-    display_entries: &[BranchEntry],
-) -> Vec<BranchInfo> {
-    let mut targets = Vec::new();
-    let mut seen = HashSet::new();
-
-    for branch_name in display_entries
-        .iter()
-        .filter(|entry| !entry.is_header())
-        .map(BranchEntry::branch_name)
-    {
-        let Some(branch) = branch_for_diff(repo, stack_info, branch_name) else {
-            continue;
-        };
-        if seen.insert(branch.name.clone()) {
-            targets.push(branch);
-        }
-    }
-
-    targets
-}
-
 fn preload_branch_diff(
     root: &std::path::Path,
     branch: BranchInfo,
@@ -2121,181 +1968,6 @@ fn preload_branch_diff(
         diff,
         highlighted_diff,
     })
-}
-
-fn build_display_entries(
-    repo: &RepoState,
-    stack_info: &StackInfo,
-    worktrees: &[WorktreeInfo],
-    expanded_stacks: &HashSet<String>,
-) -> Vec<BranchEntry> {
-    let mut entries = Vec::new();
-    let mut used_branches = std::collections::HashSet::new();
-    let branch_map: std::collections::HashMap<_, _> = repo
-        .branches
-        .iter()
-        .map(|branch| (&branch.name, branch))
-        .collect();
-    let worktree_by_branch: HashMap<_, _> = worktrees
-        .iter()
-        .filter_map(|worktree| {
-            let branch = worktree.branch.as_ref()?;
-            let label = worktree.path.file_name()?.to_string_lossy().to_string();
-            Some((branch.clone(), label))
-        })
-        .collect();
-
-    // Stacked branches
-    for stack in &stack_info.stacks {
-        used_branches.extend(stack.branches.iter().cloned());
-        entries.push(BranchEntry::Header {
-            label: stack.name.clone(),
-            expanded: Some(expanded_stacks.contains(&stack.name)),
-        });
-        if !expanded_stacks.contains(&stack.name) {
-            continue;
-        }
-        for (depth, branch_name) in stack.branches.iter().enumerate() {
-            if let Some(branch) = branch_map.get(branch_name) {
-                let stale = stack_info.is_stale(branch_name);
-                entries.push(BranchEntry::Branch {
-                    branch_name: branch_name.clone(),
-                    is_head: branch.is_head,
-                    commit_count: branch.commit_count,
-                    ahead: branch.ahead,
-                    behind: branch.behind,
-                    has_upstream: branch.upstream.is_some(),
-                    indent: depth + 1,
-                    stale,
-                    worktree_label: worktree_by_branch.get(branch_name).cloned(),
-                });
-            }
-        }
-    }
-
-    let mut standalone_names = Vec::new();
-    let mut seen_standalone = std::collections::HashSet::new();
-    if !stack_info.standalone.is_empty() {
-        for name in &stack_info.standalone {
-            if branch_map.contains_key(name) && !used_branches.contains(name) {
-                standalone_names.push(name.clone());
-                seen_standalone.insert(name.clone());
-            }
-        }
-    }
-    standalone_names.extend(
-        repo.branches
-            .iter()
-            .filter(|branch| !used_branches.contains(&branch.name))
-            .map(|branch| branch.name.clone())
-            .filter(|name| !seen_standalone.contains(name)),
-    );
-
-    if !standalone_names.is_empty() {
-        if !stack_info.stacks.is_empty() {
-            entries.push(BranchEntry::Header {
-                label: "standalone".to_string(),
-                expanded: None,
-            });
-        }
-        for branch_name in standalone_names {
-            let Some(branch) = branch_map.get(&branch_name) else {
-                continue;
-            };
-            entries.push(BranchEntry::Branch {
-                branch_name,
-                is_head: branch.is_head,
-                commit_count: branch.commit_count,
-                ahead: branch.ahead,
-                behind: branch.behind,
-                has_upstream: branch.upstream.is_some(),
-                indent: 0,
-                stale: false,
-                worktree_label: worktree_by_branch.get(&branch.name).cloned(),
-            });
-        }
-    }
-
-    entries
-}
-
-fn initial_expanded_stacks(repo: &RepoState, stack_info: &StackInfo) -> HashSet<String> {
-    stack_info
-        .stacks
-        .iter()
-        .filter(|stack| stack_contains_head(repo, stack))
-        .map(|stack| stack.name.clone())
-        .collect()
-}
-
-fn stack_contains_head(repo: &RepoState, stack: &stack::Stack) -> bool {
-    stack.branches.iter().any(|branch_name| {
-        repo.branches
-            .iter()
-            .any(|branch| branch.name == *branch_name && branch.is_head)
-    })
-}
-
-fn stack_name_for_branch<'a>(stack_info: &'a StackInfo, branch_name: &str) -> Option<&'a str> {
-    stack_info
-        .stacks
-        .iter()
-        .find(|stack| stack.branches.iter().any(|name| name == branch_name))
-        .map(|stack| stack.name.as_str())
-}
-
-fn ordered_branch_names(repo: &RepoState, stack_info: &StackInfo) -> Vec<String> {
-    let mut branches = Vec::new();
-    let mut used_branches = HashSet::new();
-
-    for stack in &stack_info.stacks {
-        for branch_name in &stack.branches {
-            if repo
-                .branches
-                .iter()
-                .any(|branch| branch.name == *branch_name)
-            {
-                branches.push(branch_name.clone());
-                used_branches.insert(branch_name.clone());
-            }
-        }
-    }
-
-    for branch_name in &stack_info.standalone {
-        if repo
-            .branches
-            .iter()
-            .any(|branch| branch.name == *branch_name)
-            && !used_branches.contains(branch_name)
-        {
-            branches.push(branch_name.clone());
-            used_branches.insert(branch_name.clone());
-        }
-    }
-
-    for branch in &repo.branches {
-        if used_branches.insert(branch.name.clone()) {
-            branches.push(branch.name.clone());
-        }
-    }
-
-    branches
-}
-
-fn branch_for_diff(
-    repo: &RepoState,
-    stack_info: &StackInfo,
-    branch_name: &str,
-) -> Option<BranchInfo> {
-    let mut branch = repo
-        .branches
-        .iter()
-        .find(|branch| branch.name == branch_name)
-        .cloned()?;
-    if let Some(parent) = stack_info.branch_to_parent.get(branch_name) {
-        branch.base_ref = Some(parent.clone());
-    }
-    Some(branch)
 }
 
 #[cfg(test)]
@@ -2395,127 +2067,6 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         }
-    }
-
-    // --- build_display_entries ---
-
-    #[test]
-    fn display_entries_no_stacks_flat_list() {
-        let repo = make_repo(&["feat-a", "feat-b", "main"]);
-        let stacks = empty_stacks();
-        let entries = build_display_entries(&repo, &stacks, &[], &HashSet::new());
-
-        // No headers when no stacks
-        assert!(entries.iter().all(|e| !e.is_header()));
-        assert_eq!(entries.len(), 3);
-    }
-
-    #[test]
-    fn display_entries_with_stack_adds_headers() {
-        let repo = make_repo(&["auth-base", "auth-ui", "main"]);
-        let stacks = StackInfo {
-            stacks: vec![Stack {
-                name: "auth stack".into(),
-                branches: vec!["auth-base".into(), "auth-ui".into()],
-            }],
-            standalone: vec!["main".into()],
-            branch_to_parent: HashMap::new(),
-            stale_branches: std::collections::HashSet::new(),
-            detection_status: StackDetectionStatus::Ready,
-        };
-
-        let entries = build_display_entries(
-            &repo,
-            &stacks,
-            &[],
-            &HashSet::from(["auth stack".to_string()]),
-        );
-
-        // Should have: header, auth-base, auth-ui, header(standalone), main
-        let headers: Vec<_> = entries.iter().filter(|e| e.is_header()).collect();
-        assert_eq!(headers.len(), 2); // "auth stack" + "standalone"
-
-        let branches: Vec<_> = entries.iter().filter(|e| !e.is_header()).collect();
-        assert_eq!(branches.len(), 3);
-    }
-
-    #[test]
-    fn display_entries_stack_branches_indented() {
-        let repo = make_repo(&["base", "mid", "top", "main"]);
-        let stacks = StackInfo {
-            stacks: vec![Stack {
-                name: "my stack".into(),
-                branches: vec!["base".into(), "mid".into(), "top".into()],
-            }],
-            standalone: vec![],
-            branch_to_parent: HashMap::new(),
-            stale_branches: std::collections::HashSet::new(),
-            detection_status: StackDetectionStatus::Ready,
-        };
-
-        let entries = build_display_entries(
-            &repo,
-            &stacks,
-            &[],
-            &HashSet::from(["my stack".to_string()]),
-        );
-
-        // Check indentation increases
-        let branch_entries: Vec<_> = entries
-            .iter()
-            .filter_map(|e| match e {
-                BranchEntry::Branch { indent, .. } => Some(*indent),
-                _ => None,
-            })
-            .collect();
-        // Stack branches get indent 1, 2, 3; standalone (main) gets 0
-        assert_eq!(branch_entries[0], 1); // base
-        assert_eq!(branch_entries[1], 2); // mid
-        assert_eq!(branch_entries[2], 3); // top
-    }
-
-    #[test]
-    fn display_entries_standalone_no_header_when_no_stacks() {
-        let repo = make_repo(&["main", "fix"]);
-        let stacks = empty_stacks();
-        let entries = build_display_entries(&repo, &stacks, &[], &HashSet::new());
-        assert!(entries.iter().all(|e| !e.is_header()));
-    }
-
-    #[test]
-    fn display_entries_use_stack_standalone_order() {
-        let repo = make_repo(&["main", "fix", "topic"]);
-        let stacks = StackInfo {
-            stacks: vec![],
-            standalone: vec!["topic".into(), "main".into(), "fix".into()],
-            branch_to_parent: HashMap::new(),
-            stale_branches: std::collections::HashSet::new(),
-            detection_status: StackDetectionStatus::Ready,
-        };
-
-        let entries = build_display_entries(&repo, &stacks, &[], &HashSet::new());
-        let names: Vec<_> = entries.iter().map(BranchEntry::branch_name).collect();
-        assert_eq!(names, vec!["topic", "main", "fix"]);
-    }
-
-    #[test]
-    fn branch_for_diff_prefers_stack_parent_over_default_base() {
-        let repo = make_repo(&["stack-base", "stack-top", "main"]);
-        let mut branch_to_parent = HashMap::new();
-        branch_to_parent.insert("stack-top".into(), "stack-base".into());
-        let stacks = StackInfo {
-            stacks: vec![Stack {
-                name: "stack".into(),
-                branches: vec!["stack-base".into(), "stack-top".into()],
-            }],
-            standalone: vec!["main".into()],
-            branch_to_parent,
-            stale_branches: std::collections::HashSet::new(),
-            detection_status: StackDetectionStatus::Ready,
-        };
-
-        let branch = branch_for_diff(&repo, &stacks, "stack-top").unwrap();
-        assert_eq!(branch.base_ref.as_deref(), Some("stack-base"));
     }
 
     #[test]
@@ -2752,60 +2303,6 @@ mod tests {
             watch_notice: None,
             user_notice: None,
         }
-    }
-
-    #[test]
-    fn parse_cli_args_supports_help_version_and_repo_path() {
-        let cli = parse_cli_args(vec!["--version".to_string(), "/tmp/repo".to_string()]).unwrap();
-        assert!(cli.show_version);
-        assert_eq!(cli.repo_path, Some(PathBuf::from("/tmp/repo")));
-
-        let cli = parse_cli_args(vec!["--help".to_string()]).unwrap();
-        assert!(cli.show_help);
-    }
-
-    #[test]
-    fn parse_cli_args_supports_color_scheme_override() {
-        let cli = parse_cli_args(vec![
-            "--color-scheme".to_string(),
-            "violet".to_string(),
-            "/tmp/repo".to_string(),
-        ])
-        .unwrap();
-        assert_eq!(cli.color_scheme, Some(ColorScheme::Violet));
-        assert_eq!(cli.repo_path, Some(PathBuf::from("/tmp/repo")));
-
-        let cli = parse_cli_args(vec!["--color-scheme=teal".to_string()]).unwrap();
-        assert_eq!(cli.color_scheme, Some(ColorScheme::Teal));
-    }
-
-    #[test]
-    fn parse_cli_args_rejects_unknown_flags() {
-        let error = parse_cli_args(vec!["--wat".to_string()])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("unknown argument"));
-    }
-
-    #[test]
-    fn parse_cli_args_rejects_invalid_or_missing_color_scheme() {
-        let invalid = parse_cli_args(vec!["--color-scheme".to_string(), "banana".to_string()])
-            .unwrap_err()
-            .to_string();
-        assert!(invalid.contains("unknown color scheme"));
-        assert!(invalid.contains("ocean"));
-
-        let missing = parse_cli_args(vec!["--color-scheme".to_string()])
-            .unwrap_err()
-            .to_string();
-        assert!(missing.contains("missing value for --color-scheme"));
-    }
-
-    #[test]
-    fn help_text_lists_color_scheme_flag_and_values() {
-        let help = help_text();
-        assert!(help.contains("--color-scheme <scheme>"));
-        assert!(help.contains("ocean, forest, amber, violet, rose, teal"));
     }
 
     #[test]
@@ -3239,60 +2736,6 @@ mod tests {
     }
 
     #[test]
-    fn build_stack_view_includes_parent_child_and_branch_status() {
-        let mut repo = make_repo(&["auth-base", "auth-ui", "main"]);
-        repo.branches[1].is_head = true;
-        repo.branches[1].ahead = 2;
-        repo.branches[1].upstream = Some("origin/auth-ui".into());
-        let stacks = StackInfo {
-            stacks: vec![Stack {
-                name: "auth stack".into(),
-                branches: vec!["auth-base".into(), "auth-ui".into()],
-            }],
-            standalone: vec!["main".into()],
-            branch_to_parent: HashMap::from([
-                ("auth-base".into(), "main".into()),
-                ("auth-ui".into(), "auth-base".into()),
-            ]),
-            stale_branches: std::collections::HashSet::from(["auth-ui".into()]),
-            detection_status: StackDetectionStatus::Ready,
-        };
-
-        let view = build_stack_view(&repo, &stacks, "auth-ui").unwrap();
-        assert_eq!(view.title, "auth stack");
-        assert_eq!(view.parent_branch.as_deref(), Some("auth-base"));
-        assert_eq!(view.child_branch, None);
-        assert_eq!(view.base_ref.as_deref(), Some("auth-base"));
-        assert!(view.stale);
-        assert_eq!(view.branches.len(), 2);
-        assert!(view.branches[1].is_selected);
-        assert!(view.branches[1].is_head);
-        assert_eq!(view.branches[1].ahead, 2);
-    }
-
-    #[test]
-    fn build_stack_view_shows_trunk_as_parent_for_bottom_branch() {
-        let repo = make_repo(&["auth-base", "auth-ui", "main"]);
-        let stacks = StackInfo {
-            stacks: vec![Stack {
-                name: "auth stack".into(),
-                branches: vec!["auth-base".into(), "auth-ui".into()],
-            }],
-            standalone: vec!["main".into()],
-            branch_to_parent: HashMap::from([
-                ("auth-base".into(), "main".into()),
-                ("auth-ui".into(), "auth-base".into()),
-            ]),
-            stale_branches: std::collections::HashSet::new(),
-            detection_status: StackDetectionStatus::Ready,
-        };
-
-        let view = build_stack_view(&repo, &stacks, "auth-base").unwrap();
-        assert_eq!(view.parent_branch.as_deref(), Some("main"));
-        assert_eq!(view.child_branch.as_deref(), Some("auth-ui"));
-    }
-
-    #[test]
     fn toggle_stack_view_only_opens_for_branches_in_a_stack() {
         let mut repo = make_repo(&["auth-base", "auth-ui", "main"]);
         repo.branches[0].is_head = true;
@@ -3363,31 +2806,6 @@ mod tests {
         }
 
         assert!(!app.show_stack_view);
-    }
-
-    #[test]
-    fn diff_preload_targets_follow_visible_branch_order() {
-        let repo = make_repo(&["base", "top", "main"]);
-        let stacks = StackInfo {
-            stacks: vec![Stack {
-                name: "stack".into(),
-                branches: vec!["base".into(), "top".into()],
-            }],
-            standalone: vec!["main".into()],
-            branch_to_parent: HashMap::from([
-                ("base".into(), "main".into()),
-                ("top".into(), "base".into()),
-            ]),
-            stale_branches: std::collections::HashSet::new(),
-            detection_status: StackDetectionStatus::Ready,
-        };
-        let entries =
-            build_display_entries(&repo, &stacks, &[], &HashSet::from(["stack".to_string()]));
-
-        let targets = diff_preload_targets(&repo, &stacks, &entries);
-        let names: Vec<_> = targets.iter().map(|branch| branch.name.as_str()).collect();
-        assert_eq!(names, vec!["base", "top", "main"]);
-        assert_eq!(targets[1].base_ref.as_deref(), Some("base"));
     }
 
     #[test]
@@ -3726,39 +3144,6 @@ mod tests {
         assert!(!app.graph_commits.is_empty());
 
         fs::remove_dir_all(repo_root).unwrap();
-    }
-
-    #[test]
-    fn display_entries_show_worktree_labels_for_checked_out_branches() {
-        let repo = make_repo(&["feature", "main"]);
-        let worktrees = vec![
-            WorktreeInfo {
-                path: PathBuf::from("/tmp/wt-main"),
-                branch: Some("main".into()),
-                is_bare: false,
-                is_active: true,
-                is_dirty: false,
-            },
-            WorktreeInfo {
-                path: PathBuf::from("/tmp/wt-feature"),
-                branch: Some("feature".into()),
-                is_bare: false,
-                is_active: false,
-                is_dirty: true,
-            },
-        ];
-
-        let entries = build_display_entries(&repo, &empty_stacks(), &worktrees, &HashSet::new());
-        let feature = entries
-            .iter()
-            .find(|entry| !entry.is_header() && entry.branch_name() == "feature")
-            .unwrap();
-        match feature {
-            BranchEntry::Branch { worktree_label, .. } => {
-                assert_eq!(worktree_label.as_deref(), Some("wt-feature"));
-            }
-            BranchEntry::Header { .. } => panic!("expected branch entry"),
-        }
     }
 
     #[test]

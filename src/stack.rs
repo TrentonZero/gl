@@ -30,7 +30,6 @@ struct ParsedBranchLine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackInfo {
     pub stacks: Vec<Stack>,
-    #[allow(dead_code)]
     pub standalone: Vec<String>,
     pub branch_to_parent: HashMap<String, String>,
     pub(crate) stale_branches: HashSet<String>,
@@ -59,7 +58,6 @@ struct CachedStackInfo {
 }
 
 impl StackInfo {
-    #[allow(dead_code)]
     pub fn stack_for_branch(&self, branch: &str) -> Option<&Stack> {
         self.stacks
             .iter()
@@ -339,7 +337,6 @@ pub(crate) fn detect_trunk(branches: &[String]) -> Option<String> {
 }
 
 /// Build stack groupings from a list of branches and their parent relationships.
-#[allow(dead_code)]
 pub(crate) fn build_stacks_from_parents(
     branches: &[String],
     branch_to_parent: &HashMap<String, String>,

@@ -173,11 +173,10 @@ Diff pane:
 
 ## Config
 
-Config path:
+Config path precedence:
 
 ```sh
 $XDG_CONFIG_HOME/gl/config.toml
-# or, when XDG_CONFIG_HOME is unset:
 ~/.config/gl/config.toml
 ```
 
