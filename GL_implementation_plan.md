@@ -14,7 +14,8 @@ Implemented today:
 
 - open a repo from the current directory or a provided path
 - list local branches
-- start non-current stacks folded in the branch list and auto-expand them when `j` / `k` navigates into them
+- start non-current stacks folded in the branch list, auto-expand them when `j` / `k` navigates into them, and refold transient expansions when `j` / `k` leaves the stack
+- allow manual stack fold and unfold controls that override transient scroll-driven stack expansion
 - infer a default base branch from `origin/HEAD`, `main`, `master`, or `trunk`
 - show ahead/behind tracking status
 - compute branch commit counts asynchronously
@@ -98,6 +99,8 @@ Delivered:
 - stack grouping in the branch list
 - non-current stacks start folded while the current stack remains expanded
 - `j` / `k` auto-expand a folded stack when sequential navigation enters it
+- transient `j` / `k` expansions refold when sequential navigation leaves the stack
+- manual fold and unfold controls pin stack visibility so `j` / `k` implicit expansion does not override it
 - standalone branch section
 - stale indicators computed from branch-parent merge-base checks
 - `J` / `K` jumps between stack groups

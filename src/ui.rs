@@ -246,7 +246,7 @@ fn help_bar_line(
     let hints = if detail_kind.is_some() {
         match (detail_kind, focus) {
             (_, FocusedPane::BranchList) => {
-                "j/k move  J/K stacks  Enter open  S status  Esc close  q quit  ? help"
+                "j/k move  J/K stacks  h/l fold  Enter open  S status  Esc close  q quit  ? help"
             }
             (Some(DetailKind::BranchDiff), FocusedPane::Diff) => {
                 "j/k scroll  J/K files  Tab commits  v view  w whitespace  Enter open commit  Backspace branch  i info  / search  Esc list"
@@ -257,9 +257,9 @@ fn help_bar_line(
             _ => ""
         }
     } else if stack_view_open {
-        "j/k move  J/K stacks  Enter open diff  s stack  Esc close  R refresh  q quit"
+        "j/k move  J/K stacks  h/l fold  Enter open diff  s stack  Esc close  R refresh  q quit"
     } else {
-        "j/k move  J/K stacks  Enter open  S status  s stack  R refresh  q quit  ? help"
+        "j/k move  J/K stacks  h/l fold  Enter open  S status  s stack  R refresh  q quit  ? help"
     };
 
     let mut line = Line::from(Span::styled(hints, Style::default().fg(Color::Gray)));
@@ -1132,7 +1132,7 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect) {
             )),
             Line::from(""),
             Line::from("Global: q quit, ? toggle help, R refresh"),
-            Line::from("Branches: j/k move, J/K jump stacks, gg/G ends, s stack"),
+            Line::from("Branches: j/k move, J/K jump stacks, h/l fold or unfold, s stack"),
             Line::from("          Ctrl-d/u half-page, Enter open branch, S status"),
             Line::from("Stack view: Esc back to list, Enter open selected diff"),
             Line::from("Branch detail: Tab commits, Enter commit diff, Backspace branch diff"),
@@ -1487,6 +1487,7 @@ mod tests {
             .collect();
         assert!(text.contains("Enter open diff"));
         assert!(text.contains("Esc close"));
+        assert!(text.contains("h/l fold"));
     }
 
     #[test]
@@ -1498,6 +1499,7 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert!(text.contains("S status"));
+        assert!(text.contains("h/l fold"));
     }
 
     #[test]

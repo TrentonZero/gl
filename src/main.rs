@@ -195,6 +195,8 @@ struct App {
     repo: RepoState,
     stack_info: StackInfo,
     expanded_stacks: HashSet<String>,
+    manual_stack_states: HashMap<String, bool>,
+    auto_expanded_stack: Option<String>,
     display_entries: Vec<BranchEntry>,
     selected_index: usize,
     show_stack_view: bool,
@@ -279,6 +281,8 @@ impl App {
             repo,
             stack_info,
             expanded_stacks,
+            manual_stack_states: HashMap::new(),
+            auto_expanded_stack: None,
             display_entries,
             selected_index: 0,
             show_stack_view: false,
@@ -497,6 +501,8 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('J') => self.jump_stack_group(1),
             KeyCode::Char('K') => self.jump_stack_group(-1),
+            KeyCode::Char('h') | KeyCode::Left => self.fold_selected_stack_manually(),
+            KeyCode::Char('l') | KeyCode::Right => self.unfold_selected_stack_manually(),
             KeyCode::Char('g') if key.modifiers.is_empty() => self.jump_to_first_branch(),
             KeyCode::Char('G') => self.jump_to_last_branch(),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -718,6 +724,10 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+
         let ordered_branches = ordered_branch_names(&self.repo, &self.stack_info);
         if ordered_branches.is_empty() {
             self.selected_index = self
@@ -728,17 +738,150 @@ impl App {
             return;
         }
 
-        let current_branch = self.selected_branch_name().unwrap_or(&ordered_branches[0]);
+        let Some(current_branch) = self.selection_anchor_branch(delta).map(ToOwned::to_owned) else {
+            return;
+        };
         let current_pos = ordered_branches
             .iter()
-            .position(|branch| branch == current_branch)
+            .position(|branch| branch == &current_branch)
             .unwrap_or(0);
-        let next_pos =
-            (current_pos as isize + delta).clamp(0, (ordered_branches.len() - 1) as isize);
-        let next_branch = &ordered_branches[next_pos as usize];
+        let step = delta.signum();
+        let mut next_pos = current_pos as isize;
 
-        self.expand_stack_for_branch(next_branch);
-        self.select_branch(next_branch);
+        loop {
+            let candidate = (next_pos + step).clamp(0, (ordered_branches.len() - 1) as isize);
+            if candidate == next_pos {
+                return;
+            }
+            next_pos = candidate;
+
+            let next_branch = &ordered_branches[next_pos as usize];
+            if self.branch_is_hidden_by_manual_fold(next_branch) {
+                continue;
+            }
+
+            self.apply_implicit_stack_navigation(&current_branch, next_branch);
+            return;
+        }
+    }
+
+    fn selection_anchor_branch(&self, delta: isize) -> Option<&str> {
+        if let Some(branch_name) = self.selected_branch_name() {
+            return Some(branch_name);
+        }
+
+        let BranchEntry::Header { label, expanded } = self.display_entries.get(self.selected_index)?
+        else {
+            return None;
+        };
+        if expanded.is_none() {
+            return None;
+        }
+
+        let stack = self
+            .stack_info
+            .stacks
+            .iter()
+            .find(|stack| stack.name == *label)?;
+        if delta.is_negative() {
+            stack.branches.first().map(String::as_str)
+        } else {
+            stack.branches.last().map(String::as_str)
+        }
+    }
+
+    fn branch_is_hidden_by_manual_fold(&self, branch_name: &str) -> bool {
+        stack_name_for_branch(&self.stack_info, branch_name)
+            .and_then(|stack_name| self.manual_stack_states.get(stack_name))
+            .is_some_and(|expanded| !expanded)
+    }
+
+    fn apply_implicit_stack_navigation(&mut self, current_branch: &str, next_branch: &str) {
+        let current_stack = stack_name_for_branch(&self.stack_info, current_branch);
+        let next_stack = stack_name_for_branch(&self.stack_info, next_branch);
+        let mut changed = false;
+
+        if current_stack != next_stack {
+            if let Some(auto_stack) = self.auto_expanded_stack.clone() {
+                if Some(auto_stack.as_str()) != next_stack
+                    && !self.manual_stack_states.contains_key(&auto_stack)
+                {
+                    changed |= self.expanded_stacks.remove(&auto_stack);
+                    self.auto_expanded_stack = None;
+                }
+            }
+
+            if let Some(stack_name) = next_stack {
+                if !self.expanded_stacks.contains(stack_name)
+                    && !self.manual_stack_states.contains_key(stack_name)
+                {
+                    self.expanded_stacks.insert(stack_name.to_string());
+                    self.auto_expanded_stack = Some(stack_name.to_string());
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.rebuild_display_entries_preserve_selection(Some(next_branch));
+        } else {
+            self.select_branch(next_branch);
+        }
+    }
+
+    fn selected_stack_name(&self) -> Option<&str> {
+        if let Some(branch_name) = self.selected_branch_name() {
+            return stack_name_for_branch(&self.stack_info, branch_name);
+        }
+
+        let BranchEntry::Header { label, expanded } = self.display_entries.get(self.selected_index)?
+        else {
+            return None;
+        };
+        expanded.is_some().then_some(label.as_str())
+    }
+
+    fn fold_selected_stack_manually(&mut self) {
+        let Some(stack_name) = self.selected_stack_name().map(ToOwned::to_owned) else {
+            return;
+        };
+
+        self.manual_stack_states.insert(stack_name.clone(), false);
+        self.expanded_stacks.remove(&stack_name);
+        if self.auto_expanded_stack.as_deref() == Some(stack_name.as_str()) {
+            self.auto_expanded_stack = None;
+        }
+
+        self.rebuild_display_entries_preserve_selection(None);
+        if let Some(index) = self.display_entries.iter().position(
+            |entry| matches!(entry, BranchEntry::Header { label, .. } if label == &stack_name),
+        ) {
+            self.selected_index = index;
+        }
+    }
+
+    fn unfold_selected_stack_manually(&mut self) {
+        let Some(stack_name) = self.selected_stack_name().map(ToOwned::to_owned) else {
+            return;
+        };
+
+        self.manual_stack_states.insert(stack_name.clone(), true);
+        self.expanded_stacks.insert(stack_name.clone());
+        if self.auto_expanded_stack.as_deref() == Some(stack_name.as_str()) {
+            self.auto_expanded_stack = None;
+        }
+
+        let selected_branch = self.selected_branch_name().map(ToOwned::to_owned);
+        self.rebuild_display_entries_preserve_selection(selected_branch.as_deref());
+        if selected_branch.is_none() {
+            if let Some(index) = self.display_entries.iter().position(|entry| {
+                !entry.is_header()
+                    && stack_name_for_branch(&self.stack_info, entry.branch_name())
+                        == Some(stack_name.as_str())
+            }) {
+                self.selected_index = index;
+            }
+        }
     }
 
     fn jump_stack_group(&mut self, direction: isize) {
@@ -1447,8 +1590,19 @@ impl App {
             .map(|stack| stack.name.clone())
             .collect();
         self.expanded_stacks.retain(|stack| valid_stack_names.contains(stack));
+        self.manual_stack_states
+            .retain(|stack, _| valid_stack_names.contains(stack));
+        if self
+            .auto_expanded_stack
+            .as_ref()
+            .is_some_and(|stack| !valid_stack_names.contains(stack))
+        {
+            self.auto_expanded_stack = None;
+        }
         for stack in &self.stack_info.stacks {
-            if !self.expanded_stacks.contains(&stack.name) && stack_contains_head(&self.repo, stack)
+            if !self.expanded_stacks.contains(&stack.name)
+                && !matches!(self.manual_stack_states.get(&stack.name), Some(false))
+                && stack_contains_head(&self.repo, stack)
             {
                 self.expanded_stacks.insert(stack.name.clone());
             }
@@ -1460,6 +1614,9 @@ impl App {
 
     fn expand_stack_for_branch(&mut self, branch_name: &str) {
         if let Some(stack_name) = stack_name_for_branch(&self.stack_info, branch_name) {
+            if matches!(self.manual_stack_states.get(stack_name), Some(false)) {
+                return;
+            }
             self.expanded_stacks.insert(stack_name.to_string());
         }
     }
@@ -2494,6 +2651,8 @@ mod tests {
             repo,
             stack_info: empty_stacks(),
             expanded_stacks: HashSet::new(),
+            manual_stack_states: HashMap::new(),
+            auto_expanded_stack: None,
             display_entries: entries,
             selected_index: 0,
             show_stack_view: false,
@@ -2694,6 +2853,47 @@ mod tests {
     }
 
     #[test]
+    fn move_selection_refolds_transient_stack_after_leaving_it() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[3].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "main")
+            .unwrap();
+
+        app.move_selection(-1);
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+        assert!(app.expanded_stacks.contains("stack B"));
+
+        app.move_selection(1);
+        assert_eq!(app.selected_branch_name(), Some("main"));
+        assert!(!app.expanded_stacks.contains("stack B"));
+        assert!(
+            app.display_entries
+                .iter()
+                .all(|entry| entry.is_header() || entry.branch_name() != "b1")
+        );
+    }
+
+    #[test]
     fn move_selection_expands_previous_collapsed_stack() {
         let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
         repo.branches[3].is_head = true;
@@ -2723,6 +2923,108 @@ mod tests {
         app.move_selection(-1);
 
         assert_eq!(app.selected_branch_name(), Some("b1"));
+    }
+
+    #[test]
+    fn manual_fold_prevents_implicit_scroll_expansion() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[1].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a2")
+            .unwrap();
+
+        app.fold_selected_stack_manually();
+        assert_eq!(
+            app.manual_stack_states.get("stack A").copied(),
+            Some(false)
+        );
+        assert!(
+            app.display_entries
+                .iter()
+                .all(|entry| entry.is_header() || entry.branch_name() != "a1")
+        );
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+        assert!(app.expanded_stacks.contains("stack B"));
+        assert!(
+            app.display_entries
+                .iter()
+                .all(|entry| entry.is_header() || entry.branch_name() != "a1")
+        );
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected_branch_name(), Some("main"));
+        assert!(!app.expanded_stacks.contains("stack B"));
+        assert!(
+            app.display_entries
+                .iter()
+                .all(|entry| entry.is_header() || entry.branch_name() != "b1")
+        );
+    }
+
+    #[test]
+    fn manual_unfold_keeps_stack_open_after_sequential_navigation_leaves() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[3].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        let stack_b_header = app
+            .display_entries
+            .iter()
+            .position(|entry| matches!(entry, BranchEntry::Header { label, .. } if label == "stack B"))
+            .unwrap();
+        app.selected_index = stack_b_header;
+
+        app.unfold_selected_stack_manually();
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+        assert_eq!(app.manual_stack_states.get("stack B").copied(), Some(true));
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected_branch_name(), Some("main"));
+        assert!(app.expanded_stacks.contains("stack B"));
+        assert!(
+            app.display_entries
+                .iter()
+                .any(|entry| !entry.is_header() && entry.branch_name() == "b1")
+        );
     }
 
     #[test]
@@ -2758,6 +3060,46 @@ mod tests {
 
         app.jump_stack_group(-1);
         assert_eq!(app.selected_index, 4);
+    }
+
+    #[test]
+    fn jump_stack_group_does_not_fold_or_unfold_stacks() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[3].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "main")
+            .unwrap();
+
+        app.move_selection(-1);
+        assert!(app.expanded_stacks.contains("stack B"));
+
+        app.jump_stack_group(-1);
+
+        assert!(app.expanded_stacks.contains("stack B"));
+        assert!(
+            app.display_entries
+                .iter()
+                .any(|entry| !entry.is_header() && entry.branch_name() == "b1")
+        );
     }
 
     #[test]
