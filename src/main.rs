@@ -15,8 +15,9 @@ use crossterm::{
 };
 use git::{
     load_branch_commits, load_branch_diff, load_commit_counts, load_commit_diff,
+    load_commit_graph,
     load_working_tree_status, open_repo, refresh_repo, BranchDiff, BranchInfo, CommitSummary,
-    DetailKind, DiffOptions, RepoState,
+    DetailKind, DiffOptions, GraphCommit, RepoState,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
@@ -29,7 +30,7 @@ use std::{
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
-use ui::{draw, BranchEntry, FocusedPane, StackView, StackViewBranch};
+use ui::{draw, BranchEntry, FocusedPane, GraphView, StackView, StackViewBranch};
 use watch::{start_repo_watcher, RepoWatcher, WatchMessage};
 
 #[cfg(test)]
@@ -99,6 +100,7 @@ struct App {
     display_entries: Vec<BranchEntry>,
     selected_index: usize,
     show_stack_view: bool,
+    show_graph_view: bool,
     detail_kind: Option<DetailKind>,
     branch_diff: Option<BranchDiff>,
     highlighted_diff: Option<Vec<Line<'static>>>,
@@ -123,6 +125,8 @@ struct App {
     diff_preload_failures: HashMap<String, String>,
     pending_diff_preloads: HashSet<String>,
     branch_detail: Option<BranchDetailState>,
+    graph_commits: Vec<GraphCommit>,
+    graph_selected_index: usize,
     diff_view: DiffViewMode,
     ignore_whitespace: bool,
     _watch_event_tx: Sender<WatchMessage>,
@@ -167,6 +171,7 @@ impl App {
             display_entries,
             selected_index: 0,
             show_stack_view: false,
+            show_graph_view: false,
             detail_kind: None,
             branch_diff: None,
             highlighted_diff: None,
@@ -191,6 +196,8 @@ impl App {
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: HashSet::new(),
             branch_detail: None,
+            graph_commits: Vec::new(),
+            graph_selected_index: 0,
             diff_view,
             ignore_whitespace,
             _watch_event_tx: watch_event_tx,
@@ -254,6 +261,7 @@ impl App {
                         &self.display_entries,
                         self.selected_index,
                         self.current_stack_view().as_ref(),
+                        self.current_graph_view(),
                         self.detail_kind,
                         self.branch_diff.as_ref(),
                         self.highlighted_diff.as_deref(),
@@ -315,6 +323,9 @@ impl App {
 
             match self.branch_diff {
                 Some(_) => self.handle_detail_keys(key)?,
+                None if self.show_graph_view && self.focus == FocusedPane::Diff => {
+                    self.handle_graph_keys(key)?
+                }
                 None => self.handle_branch_list_keys(key)?,
             }
             needs_redraw = true;
@@ -330,6 +341,9 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.refresh_repo()?;
+            }
+            KeyCode::Char('4') => {
+                self.toggle_graph_view()?;
             }
             _ => {}
         }
@@ -356,6 +370,9 @@ impl App {
             KeyCode::Char('s') => self.toggle_stack_view(),
             KeyCode::Char('S') => self.open_selected_status()?,
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
+            KeyCode::Tab if self.show_graph_view => {
+                self.focus = FocusedPane::Diff;
+            }
             KeyCode::Enter => self.open_selected_branch()?,
             _ => {}
         }
@@ -374,6 +391,35 @@ impl App {
                 FocusedPane::BranchList => self.handle_branch_list_keys(key)?,
                 FocusedPane::Diff => self.handle_diff_keys(key)?,
             },
+        }
+        Ok(())
+    }
+
+    fn handle_graph_keys(&mut self, key: KeyEvent) -> Result<()> {
+        let visible = 10usize;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.move_graph_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_graph_selection(-1),
+            KeyCode::Char('J') => self.jump_graph_branch_head(1),
+            KeyCode::Char('K') => self.jump_graph_branch_head(-1),
+            KeyCode::Char('g') if key.modifiers.is_empty() => self.graph_selected_index = 0,
+            KeyCode::Char('G') => {
+                self.graph_selected_index = self.graph_commits.len().saturating_sub(1)
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_graph_selection(visible as isize)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_graph_selection(-(visible as isize))
+            }
+            KeyCode::Tab => self.focus = FocusedPane::BranchList,
+            KeyCode::Esc => {
+                self.show_graph_view = false;
+                self.focus = FocusedPane::BranchList;
+            }
+            KeyCode::Enter => self.open_selected_graph_commit_branch()?,
+            KeyCode::Char('e') => {}
+            _ => {}
         }
         Ok(())
     }
@@ -632,6 +678,12 @@ impl App {
         self.rebuild_display_entries_preserve_selection(None);
         if self.show_stack_view && self.current_stack_view().is_none() {
             self.show_stack_view = false;
+        }
+        if self.show_graph_view {
+            self.graph_commits = load_commit_graph(&self.repo.root, &self.repo)?;
+            self.graph_selected_index = self
+                .graph_selected_index
+                .min(self.graph_commits.len().saturating_sub(1));
         }
         self.reload_stack_decorations_async();
         self.reload_commit_counts_async();
@@ -929,9 +981,78 @@ impl App {
         self.stack_view_for_selected_branch()
     }
 
+    fn current_graph_view(&self) -> Option<GraphView<'_>> {
+        self.show_graph_view.then_some(GraphView {
+            commits: &self.graph_commits,
+            selected_index: self.graph_selected_index,
+        })
+    }
+
     fn stack_view_for_selected_branch(&self) -> Option<StackView> {
         let selected_branch = self.selected_branch_name()?;
         build_stack_view(&self.repo, &self.stack_info, selected_branch)
+    }
+
+    fn toggle_graph_view(&mut self) -> Result<()> {
+        if self.show_graph_view {
+            self.show_graph_view = false;
+            self.focus = FocusedPane::BranchList;
+            return Ok(());
+        }
+
+        self.graph_commits = load_commit_graph(&self.repo.root, &self.repo)?;
+        self.graph_selected_index = 0;
+        self.show_graph_view = true;
+        self.show_stack_view = false;
+        self.focus = FocusedPane::Diff;
+        Ok(())
+    }
+
+    fn move_graph_selection(&mut self, delta: isize) {
+        if self.graph_commits.is_empty() {
+            self.graph_selected_index = 0;
+            return;
+        }
+        let max = self.graph_commits.len().saturating_sub(1) as isize;
+        self.graph_selected_index =
+            (self.graph_selected_index as isize + delta).clamp(0, max) as usize;
+    }
+
+    fn jump_graph_branch_head(&mut self, direction: isize) {
+        let branch_heads: Vec<_> = self
+            .graph_commits
+            .iter()
+            .enumerate()
+            .filter(|(_, commit)| !commit.branch_labels.is_empty())
+            .map(|(index, _)| index)
+            .collect();
+        if branch_heads.is_empty() {
+            return;
+        }
+        let current_group = branch_heads
+            .iter()
+            .rposition(|&index| index <= self.graph_selected_index)
+            .unwrap_or(0);
+        let next =
+            (current_group as isize + direction).clamp(0, branch_heads.len() as isize - 1);
+        self.graph_selected_index = branch_heads[next as usize];
+    }
+
+    fn open_selected_graph_commit_branch(&mut self) -> Result<()> {
+        let Some(commit) = self.graph_commits.get(self.graph_selected_index) else {
+            return Ok(());
+        };
+        let Some(branch_name) = commit.primary_branch.as_deref() else {
+            return Ok(());
+        };
+        if let Some(index) = self
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == branch_name)
+        {
+            self.selected_index = index;
+        }
+        self.open_selected_branch()
     }
 
     fn rebuild_display_entries_preserve_selection(&mut self, branch_name: Option<&str>) {
@@ -1902,6 +2023,7 @@ mod tests {
             display_entries: entries,
             selected_index: 0,
             show_stack_view: false,
+            show_graph_view: false,
             detail_kind: None,
             branch_diff: None,
             highlighted_diff: None,
@@ -1926,6 +2048,8 @@ mod tests {
             diff_preload_failures: HashMap::new(),
             pending_diff_preloads: std::collections::HashSet::new(),
             branch_detail: None,
+            graph_commits: Vec::new(),
+            graph_selected_index: 0,
             diff_view: DiffViewMode::Unified,
             ignore_whitespace: false,
             _watch_event_tx: watch_event_tx,
@@ -2436,6 +2560,44 @@ mod tests {
             .as_ref()
             .is_some_and(|diff| diff.ignore_whitespace
                 && diff.lines.iter().any(|line| line.text.contains("identical"))));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn toggle_graph_view_loads_commit_graph_and_focuses_graph_pane() {
+        let (repo_root, repo) = make_commit_breakdown_repo();
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
+
+        app.toggle_graph_view().unwrap();
+
+        assert!(app.show_graph_view);
+        assert_eq!(app.focus, FocusedPane::Diff);
+        assert!(!app.graph_commits.is_empty());
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn open_selected_graph_commit_branch_opens_branch_detail() {
+        let (repo_root, repo) = make_commit_breakdown_repo();
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
+        app.toggle_graph_view().unwrap();
+        app.graph_selected_index = app
+            .graph_commits
+            .iter()
+            .position(|commit| commit.primary_branch.as_deref() == Some("a1"))
+            .unwrap();
+
+        app.open_selected_graph_commit_branch().unwrap();
+
+        assert_eq!(app.detail_kind, Some(DetailKind::BranchDiff));
+        assert_eq!(
+            app.branch_detail
+                .as_ref()
+                .map(|detail| detail.branch_name.as_str()),
+            Some("a1")
+        );
 
         fs::remove_dir_all(repo_root).unwrap();
     }

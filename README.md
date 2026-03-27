@@ -32,6 +32,10 @@ Today the app is focused on one core workflow:
 - Stack view with:
   - selected-branch parent/child/base summary
   - ordered stack branch roster with stale and tracking indicators
+- Graph view with:
+  - first-parent local commit history for all local branches
+  - branch-head labels in the graph list
+  - `Enter` to open the owning branch in branch detail
 - Manual refresh with `R` as a fallback when filesystem watching is unavailable
 - Optional top and bottom chrome via `~/.config/gl/config.toml`
 - Lightweight profiling logs when `GL_PROFILE=1`
@@ -85,6 +89,7 @@ Branch list:
 - `J` / `K`: jump between stack groups
 - `gg` / `G`: jump to first or last branch
 - `Ctrl-d` / `Ctrl-u`: move faster through the list
+- `4`: open or close graph view
 - `Enter`: open selected branch diff
 - `S`: open the checked-out branch's working tree status
 - `s`: open or close the selected branch's stack view
@@ -96,6 +101,15 @@ Branch detail:
 
 - `Tab`: switch focus between branch list and diff pane
 - `Esc`: close the detail view
+
+Graph view:
+
+- `j` / `k`: move selection
+- `J` / `K`: jump between branch heads
+- `gg` / `G`: top or bottom
+- `Ctrl-d` / `Ctrl-u`: move faster through the graph
+- `Tab`: switch focus back to branch list
+- `Enter`: open the selected commit's owning branch
 
 Diff pane:
 

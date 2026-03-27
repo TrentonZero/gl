@@ -55,6 +55,17 @@ pub struct CommitSummary {
     pub committed_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCommit {
+    pub oid: String,
+    pub short_oid: String,
+    pub subject: String,
+    pub graph: String,
+    pub branch_labels: Vec<String>,
+    pub primary_branch: Option<String>,
+    pub is_merge: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailKind {
     BranchDiff,
@@ -294,6 +305,64 @@ pub fn load_working_tree_status(root: &Path, branch_name: &str, options: DiffOpt
         &unstaged_patch,
         &unstaged_stats,
     ))
+}
+
+pub fn load_commit_graph(root: &Path, repo: &RepoState) -> Result<Vec<GraphCommit>> {
+    let _timer = perf::ScopeTimer::new("load_commit_graph");
+    if repo.branches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut owner_by_oid = HashMap::new();
+    for branch in &repo.branches {
+        let rev_list = git(root, ["rev-list", "--first-parent", &branch.name])?;
+        for oid in rev_list.lines() {
+            owner_by_oid
+                .entry(oid.to_string())
+                .or_insert_with(|| branch.name.clone());
+        }
+    }
+
+    let output = git(
+        root,
+        [
+            "log",
+            "--topo-order",
+            "--first-parent",
+            "--format=%H\t%h\t%P\t%s",
+            "--branches",
+        ],
+    )?;
+    let labels_by_oid: HashMap<_, Vec<_>> = repo.branches.iter().fold(HashMap::new(), |mut acc, branch| {
+        acc.entry(branch.object_id.clone())
+            .or_insert_with(Vec::new)
+            .push(branch.name.clone());
+        acc
+    });
+
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            let oid = parts.next()?.trim().to_string();
+            let short_oid = parts.next()?.trim().to_string();
+            let parents = parts.next()?.trim().to_string();
+            let subject = parts.next()?.trim().to_string();
+            if oid.is_empty() || short_oid.is_empty() {
+                return None;
+            }
+
+            Some(GraphCommit {
+                graph: "●".to_string(),
+                branch_labels: labels_by_oid.get(&oid).cloned().unwrap_or_default(),
+                primary_branch: owner_by_oid.get(&oid).cloned(),
+                is_merge: parents.split_whitespace().count() > 1,
+                oid,
+                short_oid,
+                subject,
+            })
+        })
+        .collect())
 }
 
 fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
@@ -1195,6 +1264,32 @@ index 1111..2222 100644
         assert_eq!(paths.git_dir, paths.git_common_dir);
 
         fs::remove_dir_all(paths.root).unwrap();
+    }
+
+    #[test]
+    fn load_commit_graph_marks_branch_heads_and_owners() {
+        let repo_root = unique_temp_dir("graph-view");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+        run_git(&repo_root, &["checkout", "-b", "feature"]);
+        fs::write(repo_root.join("notes.txt"), "base\nfeature\n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "feature change"]);
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let graph = load_commit_graph(&repo_root, &repo).unwrap();
+        assert!(!graph.is_empty());
+        assert!(graph.iter().any(|commit| commit.branch_labels.iter().any(|label| label == "feature")));
+        assert!(graph
+            .iter()
+            .any(|commit| commit.primary_branch.as_deref() == Some("feature")));
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 }
 
