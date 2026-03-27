@@ -36,6 +36,10 @@ Today the app is focused on one core workflow:
   - first-parent local commit history for all local branches
   - branch-head labels in the graph list
   - `Enter` to open the owning branch in branch detail
+- Worktree manager with:
+  - clean/dirty worktree status and checked-out branch
+  - branch-list worktree tags
+  - active-context switching with `Enter`
 - Command overlay with `:q`, `:branch <name>`, and `:search <term>`
 - Manual refresh with `R` as a fallback when filesystem watching is unavailable
 - Optional top and bottom chrome via `~/.config/gl/config.toml`
@@ -43,7 +47,7 @@ Today the app is focused on one core workflow:
 
 ## What Is Not Implemented Yet
 
-The repository still contains broader design docs for worktrees and mutation workflows. Those are not implemented in the current binary.
+The repository still contains broader design docs for mutation workflows such as commit, rebase, push, and worktree creation. Those are not implemented in the current binary.
 
 ## Prerequisites
 
@@ -97,6 +101,7 @@ Branch list:
 - `gg` / `G`: jump to first or last branch
 - `Ctrl-d` / `Ctrl-u`: move faster through the list
 - `4`: open or close graph view
+- `3` or `w`: open or close the worktree manager
 - `:`: open command overlay
 - `Enter`: open selected branch diff
 - `S`: open the checked-out branch's working tree status
@@ -118,6 +123,13 @@ Graph view:
 - `Ctrl-d` / `Ctrl-u`: move faster through the graph
 - `Tab`: switch focus back to branch list
 - `Enter`: open the selected commit's owning branch
+
+Worktree manager:
+
+- `j` / `k`: move selection
+- `gg` / `G`: top or bottom
+- `Tab`: switch focus back to branch list
+- `Enter`: switch GL's active context to the selected worktree
 
 Diff pane:
 

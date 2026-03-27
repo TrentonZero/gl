@@ -14,6 +14,15 @@ pub struct RepoState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub is_bare: bool,
+    pub is_active: bool,
+    pub is_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoPaths {
     pub root: PathBuf,
     pub git_dir: PathBuf,
@@ -371,6 +380,65 @@ pub fn load_commit_graph(root: &Path, repo: &RepoState) -> Result<Vec<GraphCommi
             })
         })
         .collect())
+}
+
+pub fn load_worktrees(active_root: &Path) -> Result<Vec<WorktreeInfo>> {
+    let common_dir = repo_paths(active_root)?.git_common_dir;
+    let output = git_vec(
+        &common_dir,
+        &["--git-dir", common_dir.to_str().unwrap_or(".git"), "worktree", "list", "--porcelain"],
+    )?;
+    Ok(parse_worktree_list(&output, active_root))
+}
+
+fn parse_worktree_list(output: &str, active_root: &Path) -> Vec<WorktreeInfo> {
+    let mut worktrees = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    let mut current_bare = false;
+
+    let flush = |path: &mut Option<PathBuf>,
+                 branch: &mut Option<String>,
+                 bare: &mut bool,
+                 worktrees: &mut Vec<WorktreeInfo>| {
+        if let Some(path) = path.take() {
+            let is_dirty = !git(&path, ["status", "--short"])
+                .map(|status| status.trim().is_empty())
+                .unwrap_or(true);
+            worktrees.push(WorktreeInfo {
+                is_active: path == active_root,
+                path,
+                branch: branch.take(),
+                is_bare: *bare,
+                is_dirty,
+            });
+        }
+        *bare = false;
+    };
+
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            flush(
+                &mut current_path,
+                &mut current_branch,
+                &mut current_bare,
+                &mut worktrees,
+            );
+            current_path = Some(PathBuf::from(path.trim()));
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            current_branch = Some(branch.trim().to_string());
+        } else if line == "bare" {
+            current_bare = true;
+        }
+    }
+
+    flush(
+        &mut current_path,
+        &mut current_branch,
+        &mut current_bare,
+        &mut worktrees,
+    );
+    worktrees
 }
 
 fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
@@ -1309,6 +1377,23 @@ index 1111..2222 100644
             .any(|commit| commit.primary_branch.as_deref() == Some("feature")));
 
         fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn parse_worktree_list_reads_branch_active_and_dirty_flags() {
+        let root = unique_temp_dir("parse-worktree-list");
+        let other = root.with_extension("other");
+        let output = format!(
+            "worktree {}\nHEAD deadbeef\nbranch refs/heads/main\n\nworktree {}\nHEAD feedface\nbranch refs/heads/feature\n",
+            root.display(),
+            other.display()
+        );
+
+        let worktrees = parse_worktree_list(&output, &root);
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert!(worktrees[0].is_active);
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feature"));
     }
 }
 

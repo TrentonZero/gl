@@ -1,6 +1,6 @@
 use crate::{
     config::{AppConfig, ColorScheme, DiffViewMode},
-    git::{BranchDiff, DetailKind, DiffLineKind, GraphCommit, RepoState},
+    git::{BranchDiff, DetailKind, DiffLineKind, GraphCommit, RepoState, WorktreeInfo},
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -45,6 +45,12 @@ pub struct GraphView<'a> {
     pub selected_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeView<'a> {
+    pub worktrees: &'a [WorktreeInfo],
+    pub selected_index: usize,
+}
+
 #[derive(Debug, Clone)]
 pub enum BranchEntry {
     Header {
@@ -59,6 +65,7 @@ pub enum BranchEntry {
         has_upstream: bool,
         indent: usize,
         stale: bool,
+        worktree_label: Option<String>,
     },
 }
 
@@ -83,6 +90,7 @@ pub fn draw(
     selected_index: usize,
     stack_view: Option<&StackView>,
     graph_view: Option<GraphView<'_>>,
+    worktree_view: Option<WorktreeView<'_>>,
     detail_kind: Option<DetailKind>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
@@ -137,6 +145,7 @@ pub fn draw(
         selected_index,
         stack_view,
         graph_view,
+        worktree_view,
         detail_kind,
         branch_diff,
         highlighted_diff,
@@ -256,6 +265,7 @@ fn draw_body(
     selected_index: usize,
     stack_view: Option<&StackView>,
     graph_view: Option<GraphView<'_>>,
+    worktree_view: Option<WorktreeView<'_>>,
     detail_kind: Option<DetailKind>,
     branch_diff: Option<&BranchDiff>,
     highlighted_diff: Option<&[Line<'static>]>,
@@ -308,6 +318,13 @@ fn draw_body(
                     .split(area);
                 draw_branch_list(frame, panes[0], display_entries, selected_index, focus == FocusedPane::BranchList);
                 draw_graph_view(frame, panes[1], graph_view, focus == FocusedPane::Diff);
+            } else if let Some(worktree_view) = worktree_view {
+                let panes = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(34), Constraint::Min(1)])
+                    .split(area);
+                draw_branch_list(frame, panes[0], display_entries, selected_index, focus == FocusedPane::BranchList);
+                draw_worktree_view(frame, panes[1], worktree_view, focus == FocusedPane::Diff);
             } else {
                 draw_branch_list(frame, area, display_entries, selected_index, true);
             }
@@ -370,6 +387,7 @@ fn branch_entry_item(entry: &BranchEntry, available_width: usize) -> Line<'stati
             has_upstream,
             indent,
             stale,
+            worktree_label,
         } => {
             let mut spans = Vec::new();
 
@@ -431,6 +449,13 @@ fn branch_entry_item(entry: &BranchEntry, available_width: usize) -> Line<'stati
                         Style::default().fg(Color::Red),
                     ));
                 }
+            }
+
+            if let Some(worktree_label) = worktree_label {
+                spans.push(Span::styled(
+                    format!("  [{worktree_label}]"),
+                    Style::default().fg(Color::Cyan),
+                ));
             }
 
             Line::from(spans)
@@ -645,6 +670,55 @@ fn draw_graph_view(frame: &mut Frame<'_>, area: Rect, graph_view: GraphView<'_>,
         )
         .highlight_symbol(" ");
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_worktree_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    worktree_view: WorktreeView<'_>,
+    focused: bool,
+) {
+    let items: Vec<ListItem<'_>> = worktree_view
+        .worktrees
+        .iter()
+        .map(worktree_line)
+        .map(ListItem::new)
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(
+        worktree_view
+            .selected_index
+            .min(worktree_view.worktrees.len().saturating_sub(1)),
+    ));
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title("Worktrees")
+                .borders(Borders::ALL)
+                .border_style(if focused {
+                    Style::default().fg(Color::Blue)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(51, 70, 124))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn worktree_line(worktree: &WorktreeInfo) -> Line<'static> {
+    let status = if worktree.is_dirty { "dirty" } else { "clean" };
+    let active = if worktree.is_active { "* " } else { "  " };
+    let branch = worktree.branch.as_deref().unwrap_or("(detached)");
+    let suffix = if worktree.is_bare { "bare" } else { status };
+    Line::from(format!(
+        "{active}{branch:<16} {suffix:<5} {}",
+        worktree.path.display()
+    ))
 }
 
 fn graph_commit_line(commit: &GraphCommit) -> Line<'static> {
@@ -1084,6 +1158,7 @@ mod tests {
             has_upstream: false,
             indent: 0,
             stale: false,
+            worktree_label: None,
         };
         assert!(!entry.is_header());
     }
@@ -1099,6 +1174,7 @@ mod tests {
             has_upstream: false,
             indent: 0,
             stale: false,
+            worktree_label: None,
         };
         assert_eq!(entry.branch_name(), "feature/auth");
     }
@@ -1162,6 +1238,7 @@ mod tests {
             has_upstream: false,
             indent: 0,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1179,6 +1256,7 @@ mod tests {
             has_upstream: false,
             indent: 0,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1196,6 +1274,7 @@ mod tests {
             has_upstream: true,
             indent: 0,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1213,6 +1292,7 @@ mod tests {
             has_upstream: true,
             indent: 0,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1231,6 +1311,7 @@ mod tests {
             has_upstream: false,
             indent: 1,
             stale: true,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1248,6 +1329,7 @@ mod tests {
             has_upstream: false,
             indent: 2,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1266,6 +1348,7 @@ mod tests {
             has_upstream: false,
             indent: 3,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 40);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1283,10 +1366,29 @@ mod tests {
             has_upstream: true,
             indent: 3,
             stale: false,
+            worktree_label: None,
         };
         let line = branch_entry_item(&entry, 24);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("~"));
+    }
+
+    #[test]
+    fn branch_item_shows_worktree_label() {
+        let entry = BranchEntry::Branch {
+            branch_name: "feat".into(),
+            is_head: false,
+            commit_count: 0,
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            indent: 0,
+            stale: false,
+            worktree_label: Some("wt-feature".into()),
+        };
+        let line = branch_entry_item(&entry, 60);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[wt-feature]"));
     }
 
     #[test]

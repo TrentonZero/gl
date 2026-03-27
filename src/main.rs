@@ -16,8 +16,8 @@ use crossterm::{
 use git::{
     load_branch_commits, load_branch_diff, load_commit_counts, load_commit_diff,
     load_commit_graph,
-    load_working_tree_status, open_repo, refresh_repo, BranchDiff, BranchInfo, CommitSummary,
-    DetailKind, DiffOptions, GraphCommit, RepoState,
+    load_working_tree_status, load_worktrees, open_repo, refresh_repo, BranchDiff, BranchInfo,
+    CommitSummary, DetailKind, DiffOptions, GraphCommit, RepoState, WorktreeInfo,
 };
 use ratatui::{backend::CrosstermBackend, text::Line, Terminal};
 use stack::{detect_stacks, enrich_stacks, StackDetectionStatus, StackInfo};
@@ -30,7 +30,7 @@ use std::{
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
-use ui::{draw, BranchEntry, FocusedPane, GraphView, StackView, StackViewBranch};
+use ui::{draw, BranchEntry, FocusedPane, GraphView, StackView, StackViewBranch, WorktreeView};
 use watch::{start_repo_watcher, RepoWatcher, WatchMessage};
 
 #[cfg(test)]
@@ -153,6 +153,7 @@ struct App {
     selected_index: usize,
     show_stack_view: bool,
     show_graph_view: bool,
+    show_worktree_view: bool,
     detail_kind: Option<DetailKind>,
     branch_diff: Option<BranchDiff>,
     highlighted_diff: Option<Vec<Line<'static>>>,
@@ -181,6 +182,8 @@ struct App {
     branch_detail: Option<BranchDetailState>,
     graph_commits: Vec<GraphCommit>,
     graph_selected_index: usize,
+    worktrees: Vec<WorktreeInfo>,
+    worktree_selected_index: usize,
     diff_view: DiffViewMode,
     ignore_whitespace: bool,
     _watch_event_tx: Sender<WatchMessage>,
@@ -204,7 +207,8 @@ impl App {
         let _ = &config.worktree_path_defaults;
         let diff_view = config.diff_view;
         let ignore_whitespace = config.ignore_whitespace;
-        let display_entries = build_display_entries(&repo, &stack_info);
+        let worktrees = load_worktrees(&repo.root).unwrap_or_default();
+        let display_entries = build_display_entries(&repo, &stack_info, &worktrees);
         let (stack_result_tx, stack_result_rx) = mpsc::channel();
         let (commit_count_result_tx, commit_count_result_rx) = mpsc::channel();
         let (diff_preload_result_tx, diff_preload_result_rx) = mpsc::channel();
@@ -228,6 +232,7 @@ impl App {
             selected_index: 0,
             show_stack_view: false,
             show_graph_view: false,
+            show_worktree_view: false,
             detail_kind: None,
             branch_diff: None,
             highlighted_diff: None,
@@ -256,6 +261,8 @@ impl App {
             branch_detail: None,
             graph_commits: Vec::new(),
             graph_selected_index: 0,
+            worktrees,
+            worktree_selected_index: 0,
             diff_view,
             ignore_whitespace,
             _watch_event_tx: watch_event_tx,
@@ -321,6 +328,7 @@ impl App {
                         self.selected_index,
                         self.current_stack_view().as_ref(),
                         self.current_graph_view(),
+                        self.current_worktree_view(),
                         self.detail_kind,
                         self.branch_diff.as_ref(),
                         self.highlighted_diff.as_deref(),
@@ -394,6 +402,9 @@ impl App {
                 None if self.show_graph_view && self.focus == FocusedPane::Diff => {
                     self.handle_graph_keys(key)?
                 }
+                None if self.show_worktree_view && self.focus == FocusedPane::Diff => {
+                    self.handle_worktree_keys(key)?
+                }
                 None => self.handle_branch_list_keys(key)?,
             }
             needs_redraw = true;
@@ -412,6 +423,9 @@ impl App {
             }
             KeyCode::Char(ch) if ch == self.config.keybindings.graph_view => {
                 self.toggle_graph_view()?;
+            }
+            KeyCode::Char('3') => {
+                self.toggle_worktree_view()?;
             }
             KeyCode::Char(ch) if ch == self.config.keybindings.command => {
                 self.command_mode = true;
@@ -439,8 +453,13 @@ impl App {
             }
             KeyCode::Char(ch) if ch == self.config.keybindings.stack_view => self.toggle_stack_view(),
             KeyCode::Char(ch) if ch == self.config.keybindings.status_view => self.open_selected_status()?,
+            KeyCode::Char('w') if self.detail_kind.is_none() => self.toggle_worktree_view()?,
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
+            KeyCode::Esc if self.show_worktree_view => self.show_worktree_view = false,
             KeyCode::Tab if self.show_graph_view => {
+                self.focus = FocusedPane::Diff;
+            }
+            KeyCode::Tab if self.show_worktree_view => {
                 self.focus = FocusedPane::Diff;
             }
             KeyCode::Enter => self.open_selected_branch()?,
@@ -489,6 +508,25 @@ impl App {
             }
             KeyCode::Enter => self.open_selected_graph_commit_branch()?,
             KeyCode::Char('e') => {}
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_worktree_keys(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.move_worktree_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_worktree_selection(-1),
+            KeyCode::Char('g') if key.modifiers.is_empty() => self.worktree_selected_index = 0,
+            KeyCode::Char('G') => {
+                self.worktree_selected_index = self.worktrees.len().saturating_sub(1)
+            }
+            KeyCode::Tab => self.focus = FocusedPane::BranchList,
+            KeyCode::Esc => {
+                self.show_worktree_view = false;
+                self.focus = FocusedPane::BranchList;
+            }
+            KeyCode::Enter => self.switch_to_selected_worktree()?,
             _ => {}
         }
         Ok(())
@@ -796,6 +834,7 @@ impl App {
     fn refresh_repo(&mut self) -> Result<()> {
         let _timer = perf::ScopeTimer::new("App::refresh_repo");
         self.repo = refresh_repo(&self.repo.root)?;
+        self.worktrees = load_worktrees(&self.repo.root).unwrap_or_default();
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
         self.reset_diff_preload_state();
         self.rebuild_display_entries_preserve_selection(None);
@@ -807,6 +846,13 @@ impl App {
             self.graph_selected_index = self
                 .graph_selected_index
                 .min(self.graph_commits.len().saturating_sub(1));
+        }
+        if self.show_worktree_view {
+            self.worktree_selected_index = self
+                .worktrees
+                .iter()
+                .position(|worktree| worktree.is_active)
+                .unwrap_or(0);
         }
         self.reload_stack_decorations_async();
         self.reload_commit_counts_async();
@@ -1111,6 +1157,13 @@ impl App {
         })
     }
 
+    fn current_worktree_view(&self) -> Option<WorktreeView<'_>> {
+        self.show_worktree_view.then_some(WorktreeView {
+            worktrees: &self.worktrees,
+            selected_index: self.worktree_selected_index,
+        })
+    }
+
     fn stack_view_for_selected_branch(&self) -> Option<StackView> {
         let selected_branch = self.selected_branch_name()?;
         build_stack_view(&self.repo, &self.stack_info, selected_branch)
@@ -1127,6 +1180,26 @@ impl App {
         self.graph_selected_index = 0;
         self.show_graph_view = true;
         self.show_stack_view = false;
+        self.show_worktree_view = false;
+        self.focus = FocusedPane::Diff;
+        Ok(())
+    }
+
+    fn toggle_worktree_view(&mut self) -> Result<()> {
+        if self.show_worktree_view {
+            self.show_worktree_view = false;
+            self.focus = FocusedPane::BranchList;
+            return Ok(());
+        }
+        self.worktrees = load_worktrees(&self.repo.root)?;
+        self.worktree_selected_index = self
+            .worktrees
+            .iter()
+            .position(|worktree| worktree.is_active)
+            .unwrap_or(0);
+        self.show_worktree_view = true;
+        self.show_stack_view = false;
+        self.show_graph_view = false;
         self.focus = FocusedPane::Diff;
         Ok(())
     }
@@ -1178,11 +1251,67 @@ impl App {
         self.open_selected_branch()
     }
 
+    fn move_worktree_selection(&mut self, delta: isize) {
+        if self.worktrees.is_empty() {
+            self.worktree_selected_index = 0;
+            return;
+        }
+        let max = self.worktrees.len().saturating_sub(1) as isize;
+        self.worktree_selected_index =
+            (self.worktree_selected_index as isize + delta).clamp(0, max) as usize;
+    }
+
+    fn switch_to_selected_worktree(&mut self) -> Result<()> {
+        let Some(worktree) = self.worktrees.get(self.worktree_selected_index).cloned() else {
+            return Ok(());
+        };
+        if worktree.is_bare {
+            self.user_notice = Some("Cannot switch into a bare worktree entry.".to_string());
+            return Ok(());
+        }
+
+        self.repo = refresh_repo(&worktree.path)?;
+        self.worktrees = load_worktrees(&worktree.path)?;
+        self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
+        let (repo_watcher, watch_notice) = match start_repo_watcher(&self.repo.root, self._watch_event_tx.clone()) {
+            Ok(watcher) => (Some(watcher), None),
+            Err(error) => (
+                None,
+                Some(format!("Filesystem watching unavailable; use R to refresh ({error})")),
+            ),
+        };
+        self._repo_watcher = repo_watcher;
+        self.watch_notice = watch_notice;
+        self.graph_commits.clear();
+        self.show_worktree_view = true;
+        self.worktree_selected_index = self
+            .worktrees
+            .iter()
+            .position(|candidate| candidate.path == worktree.path)
+            .unwrap_or(0);
+        self.reset_diff_preload_state();
+        self.rebuild_display_entries_preserve_selection(None);
+        self.reload_stack_decorations_async();
+        self.reload_commit_counts_async();
+        self.start_diff_preload_async();
+        if let Some(head_branch_name) = self
+            .repo
+            .branches
+            .iter()
+            .find(|branch| branch.is_head)
+            .map(|branch| branch.name.clone())
+        {
+            let _ = self.jump_to_branch(&head_branch_name);
+        }
+        self.user_notice = Some(format!("Switched to worktree {}", worktree.path.display()));
+        Ok(())
+    }
+
     fn rebuild_display_entries_preserve_selection(&mut self, branch_name: Option<&str>) {
         let selected_branch = branch_name
             .map(ToOwned::to_owned)
             .or_else(|| self.selected_branch_name().map(ToOwned::to_owned));
-        self.display_entries = build_display_entries(&self.repo, &self.stack_info);
+        self.display_entries = build_display_entries(&self.repo, &self.stack_info, &self.worktrees);
 
         if let Some(branch_name) = selected_branch {
             if let Some(index) = self
@@ -1687,13 +1816,25 @@ fn preload_branch_diff(
     })
 }
 
-fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<BranchEntry> {
+fn build_display_entries(
+    repo: &RepoState,
+    stack_info: &StackInfo,
+    worktrees: &[WorktreeInfo],
+) -> Vec<BranchEntry> {
     let mut entries = Vec::new();
     let mut used_branches = std::collections::HashSet::new();
     let branch_map: std::collections::HashMap<_, _> = repo
         .branches
         .iter()
         .map(|branch| (&branch.name, branch))
+        .collect();
+    let worktree_by_branch: HashMap<_, _> = worktrees
+        .iter()
+        .filter_map(|worktree| {
+            let branch = worktree.branch.as_ref()?;
+            let label = worktree.path.file_name()?.to_string_lossy().to_string();
+            Some((branch.clone(), label))
+        })
         .collect();
 
     // Stacked branches
@@ -1713,6 +1854,7 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
                     has_upstream: branch.upstream.is_some(),
                     indent: depth + 1,
                     stale,
+                    worktree_label: worktree_by_branch.get(branch_name).cloned(),
                 });
                 used_branches.insert(branch_name.clone());
             }
@@ -1756,6 +1898,7 @@ fn build_display_entries(repo: &RepoState, stack_info: &StackInfo) -> Vec<Branch
                 has_upstream: branch.upstream.is_some(),
                 indent: 0,
                 stale: false,
+                worktree_label: worktree_by_branch.get(&branch.name).cloned(),
             });
         }
     }
@@ -1884,7 +2027,7 @@ mod tests {
     fn display_entries_no_stacks_flat_list() {
         let repo = make_repo(&["feat-a", "feat-b", "main"]);
         let stacks = empty_stacks();
-        let entries = build_display_entries(&repo, &stacks);
+        let entries = build_display_entries(&repo, &stacks, &[]);
 
         // No headers when no stacks
         assert!(entries.iter().all(|e| !e.is_header()));
@@ -1905,7 +2048,7 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let entries = build_display_entries(&repo, &stacks);
+        let entries = build_display_entries(&repo, &stacks, &[]);
 
         // Should have: header, auth-base, auth-ui, header(standalone), main
         let headers: Vec<_> = entries.iter().filter(|e| e.is_header()).collect();
@@ -1929,7 +2072,7 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let entries = build_display_entries(&repo, &stacks);
+        let entries = build_display_entries(&repo, &stacks, &[]);
 
         // Check indentation increases
         let branch_entries: Vec<_> = entries
@@ -1949,7 +2092,7 @@ mod tests {
     fn display_entries_standalone_no_header_when_no_stacks() {
         let repo = make_repo(&["main", "fix"]);
         let stacks = empty_stacks();
-        let entries = build_display_entries(&repo, &stacks);
+        let entries = build_display_entries(&repo, &stacks, &[]);
         assert!(entries.iter().all(|e| !e.is_header()));
     }
 
@@ -1964,7 +2107,7 @@ mod tests {
             detection_status: StackDetectionStatus::Ready,
         };
 
-        let entries = build_display_entries(&repo, &stacks);
+        let entries = build_display_entries(&repo, &stacks, &[]);
         let names: Vec<_> = entries.iter().map(BranchEntry::branch_name).collect();
         assert_eq!(names, vec!["topic", "main", "fix"]);
     }
@@ -2118,6 +2261,7 @@ mod tests {
                 has_upstream: false,
                 indent: 1,
                 stale: false,
+                worktree_label: None,
             },
             BranchEntry::Branch {
                 branch_name: "a2".into(),
@@ -2128,6 +2272,7 @@ mod tests {
                 has_upstream: false,
                 indent: 2,
                 stale: false,
+                worktree_label: None,
             },
             BranchEntry::Header {
                 label: "stack B".into(),
@@ -2141,6 +2286,7 @@ mod tests {
                 has_upstream: false,
                 indent: 1,
                 stale: false,
+                worktree_label: None,
             },
             BranchEntry::Header {
                 label: "standalone".into(),
@@ -2154,6 +2300,7 @@ mod tests {
                 has_upstream: false,
                 indent: 0,
                 stale: false,
+                worktree_label: None,
             },
         ]
     }
@@ -2176,6 +2323,7 @@ mod tests {
             selected_index: 0,
             show_stack_view: false,
             show_graph_view: false,
+            show_worktree_view: false,
             detail_kind: None,
             branch_diff: None,
             highlighted_diff: None,
@@ -2204,6 +2352,8 @@ mod tests {
             branch_detail: None,
             graph_commits: Vec::new(),
             graph_selected_index: 0,
+            worktrees: Vec::new(),
+            worktree_selected_index: 0,
             diff_view: DiffViewMode::Unified,
             ignore_whitespace: false,
             _watch_event_tx: watch_event_tx,
@@ -2414,7 +2564,7 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         };
-        app.display_entries = build_display_entries(&app.repo, &app.stack_info);
+        app.display_entries = build_display_entries(&app.repo, &app.stack_info, &[]);
         app.selected_index = app
             .display_entries
             .iter()
@@ -2446,7 +2596,7 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         };
-        let entries = build_display_entries(&repo, &stacks);
+        let entries = build_display_entries(&repo, &stacks, &[]);
 
         let targets = diff_preload_targets(&repo, &stacks, &entries);
         let names: Vec<_> = targets.iter().map(|branch| branch.name.as_str()).collect();
@@ -2787,6 +2937,83 @@ mod tests {
         assert!(!app.graph_commits.is_empty());
 
         fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn display_entries_show_worktree_labels_for_checked_out_branches() {
+        let repo = make_repo(&["feature", "main"]);
+        let worktrees = vec![
+            WorktreeInfo {
+                path: PathBuf::from("/tmp/wt-main"),
+                branch: Some("main".into()),
+                is_bare: false,
+                is_active: true,
+                is_dirty: false,
+            },
+            WorktreeInfo {
+                path: PathBuf::from("/tmp/wt-feature"),
+                branch: Some("feature".into()),
+                is_bare: false,
+                is_active: false,
+                is_dirty: true,
+            },
+        ];
+
+        let entries = build_display_entries(&repo, &empty_stacks(), &worktrees);
+        let feature = entries
+            .iter()
+            .find(|entry| !entry.is_header() && entry.branch_name() == "feature")
+            .unwrap();
+        match feature {
+            BranchEntry::Branch { worktree_label, .. } => {
+                assert_eq!(worktree_label.as_deref(), Some("wt-feature"));
+            }
+            BranchEntry::Header { .. } => panic!("expected branch entry"),
+        }
+    }
+
+    #[test]
+    fn switch_to_selected_worktree_updates_active_repo_root() {
+        let repo_root = unique_temp_dir("worktree-switch");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+        run_git(&repo_root, &["branch", "feature"]);
+
+        let feature_worktree = unique_temp_dir("feature-wt");
+        run_git(
+            &repo_root,
+            &["worktree", "add", feature_worktree.to_str().unwrap(), "feature"],
+        );
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let mut app = App::new_for_test(AppConfig::default(), repo, empty_stacks());
+        app.worktrees = load_worktrees(&repo_root).unwrap();
+        app.worktree_selected_index = app
+            .worktrees
+            .iter()
+            .position(|worktree| worktree.branch.as_deref() == Some("feature"))
+            .unwrap();
+
+        app.switch_to_selected_worktree().unwrap();
+
+        assert_eq!(
+            app.repo.root.canonicalize().unwrap(),
+            feature_worktree.canonicalize().unwrap()
+        );
+        assert!(app
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.is_active && worktree.branch.as_deref() == Some("feature")));
+
+        let active_root = app.repo.root.clone();
+        drop(app);
+        fs::remove_dir_all(repo_root).unwrap();
+        fs::remove_dir_all(active_root).ok();
     }
 
     #[test]
