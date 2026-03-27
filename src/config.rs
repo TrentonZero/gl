@@ -13,8 +13,6 @@ pub struct AppConfig {
     pub color_scheme: ColorScheme,
     #[serde(default)]
     pub keybindings: KeyBindings,
-    #[serde(default)]
-    pub worktree_path_defaults: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
@@ -97,7 +95,6 @@ impl Default for AppConfig {
             ignore_whitespace: false,
             color_scheme: ColorScheme::Ocean,
             keybindings: KeyBindings::default(),
-            worktree_path_defaults: Vec::new(),
         }
     }
 }
@@ -118,17 +115,37 @@ impl Default for KeyBindings {
 
 impl AppConfig {
     pub fn load() -> Self {
-        let Some(home) = env::var_os("HOME") else {
+        let Some(path) = resolve_config_path() else {
             return Self::default();
         };
-
-        let path = PathBuf::from(home).join(".config/gl/config.toml");
         let Ok(contents) = fs::read_to_string(path) else {
             return Self::default();
         };
 
         toml::from_str(&contents).unwrap_or_default()
     }
+}
+
+fn resolve_config_path() -> Option<PathBuf> {
+    resolve_config_path_from_values(
+        env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+    )
+}
+
+fn resolve_config_path_from_values(
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = xdg_config_home {
+        return Some(path.join("gl").join("config.toml"));
+    }
+
+    home.map(|path| path.join(".config").join("gl").join("config.toml"))
 }
 
 const fn default_true() -> bool {
@@ -229,12 +246,10 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_color_scheme_and_worktree_defaults() {
-        let toml_str =
-            "color_scheme = \"forest\"\nworktree_path_defaults = [\"~/src\", \"~/wt\"]\n";
+    fn deserialize_color_scheme() {
+        let toml_str = "color_scheme = \"forest\"\n";
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.color_scheme, ColorScheme::Forest);
-        assert_eq!(config.worktree_path_defaults.len(), 2);
     }
 
     #[test]
@@ -256,5 +271,27 @@ mod tests {
             assert_eq!(ColorScheme::parse(scheme.as_str()), Some(scheme));
         }
         assert_eq!(ColorScheme::parse("unknown"), None);
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_xdg_config_home() {
+        let path = resolve_config_path_from_values(
+            Some(PathBuf::from("/xdg")),
+            Some(PathBuf::from("/home/test")),
+        );
+
+        assert_eq!(path, Some(PathBuf::from("/xdg/gl/config.toml")));
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_home_config() {
+        let path = resolve_config_path_from_values(None, Some(PathBuf::from("/home/test")));
+
+        assert_eq!(path, Some(PathBuf::from("/home/test/.config/gl/config.toml")));
+    }
+
+    #[test]
+    fn resolve_config_path_returns_none_without_xdg_or_home() {
+        assert_eq!(resolve_config_path_from_values(None, None), None);
     }
 }
