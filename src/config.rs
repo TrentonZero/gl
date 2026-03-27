@@ -71,7 +71,7 @@ impl ColorScheme {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub struct KeyBindings {
     #[serde(default = "default_quit_key")]
     pub quit: char,
