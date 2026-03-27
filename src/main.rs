@@ -885,7 +885,6 @@ impl App {
     }
 
     fn jump_stack_group(&mut self, direction: isize) {
-        // Find header positions
         let headers: Vec<usize> = self
             .display_entries
             .iter()
@@ -898,30 +897,32 @@ impl App {
             return;
         }
 
-        // Find the first selectable entry after each header
-        let group_starts: Vec<usize> = headers
+        let current_group = headers
             .iter()
-            .filter_map(|&h| {
-                self.display_entries
-                    .iter()
-                    .enumerate()
-                    .skip(h + 1)
-                    .find(|(_, e)| !e.is_header())
-                    .map(|(i, _)| i)
-            })
-            .collect();
-
-        if group_starts.is_empty() {
-            return;
-        }
-
-        let current_group = group_starts
-            .iter()
-            .rposition(|&s| s <= self.selected_index)
+            .rposition(|&header| header <= self.selected_index)
             .unwrap_or(0);
         let next_group =
-            (current_group as isize + direction).clamp(0, (group_starts.len() - 1) as isize);
-        self.selected_index = group_starts[next_group as usize];
+            (current_group as isize + direction).clamp(0, (headers.len() - 1) as isize) as usize;
+        let header_index = headers[next_group];
+        let next_header_index = headers.get(next_group + 1).copied();
+
+        let target = match self.display_entries.get(header_index) {
+            Some(BranchEntry::Header {
+                expanded: Some(false),
+                ..
+            }) => header_index,
+            _ => self
+                .display_entries
+                .iter()
+                .enumerate()
+                .skip(header_index + 1)
+                .take_while(|(index, _)| next_header_index.is_none_or(|next| *index < next))
+                .find(|(_, entry)| !entry.is_header())
+                .map(|(index, _)| index)
+                .unwrap_or(header_index),
+        };
+
+        self.selected_index = target;
     }
 
     fn jump_to_first_branch(&mut self) {
@@ -3049,17 +3050,45 @@ mod tests {
 
     #[test]
     fn jump_stack_group_moves_to_next_group_start() {
-        let mut app = make_test_app(make_test_entries());
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[1].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a1")
+            .unwrap();
 
-        app.jump_to_first_branch();
         app.jump_stack_group(1);
-        assert_eq!(app.selected_index, 4);
+        assert!(matches!(
+            app.display_entries.get(app.selected_index),
+            Some(BranchEntry::Header { label, expanded: Some(false) }) if label == "stack B"
+        ));
 
         app.jump_stack_group(1);
-        assert_eq!(app.selected_index, 6);
+        assert_eq!(app.selected_branch_name(), Some("main"));
 
         app.jump_stack_group(-1);
-        assert_eq!(app.selected_index, 4);
+        assert!(matches!(
+            app.display_entries.get(app.selected_index),
+            Some(BranchEntry::Header { label, expanded: Some(false) }) if label == "stack B"
+        ));
     }
 
     #[test]
@@ -3100,6 +3129,45 @@ mod tests {
                 .iter()
                 .any(|entry| !entry.is_header() && entry.branch_name() == "b1")
         );
+        assert!(matches!(
+            app.display_entries.get(app.selected_index),
+            Some(BranchEntry::Header { label, expanded: Some(false) }) if label == "stack A"
+        ));
+    }
+
+    #[test]
+    fn jump_stack_group_targets_collapsed_stack_header() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[1].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+        app.selected_index = app
+            .display_entries
+            .iter()
+            .position(|entry| !entry.is_header() && entry.branch_name() == "a2")
+            .unwrap();
+
+        app.jump_stack_group(1);
+
+        assert!(matches!(
+            app.display_entries.get(app.selected_index),
+            Some(BranchEntry::Header { label, expanded: Some(false) }) if label == "stack B"
+        ));
     }
 
     #[test]
