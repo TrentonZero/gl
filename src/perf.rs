@@ -1,5 +1,4 @@
 use std::{
-    env,
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -8,10 +7,7 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 
 pub fn enabled() -> bool {
-    *ENABLED.get_or_init(|| match env::var("GL_PROFILE") {
-        Ok(value) => value != "0" && !value.is_empty(),
-        Err(_) => false,
-    })
+    *ENABLED.get_or_init(crate::logger::profiling_enabled)
 }
 
 pub fn log(label: impl AsRef<str>) {
@@ -20,11 +16,11 @@ pub fn log(label: impl AsRef<str>) {
     }
 
     let elapsed = START.get_or_init(Instant::now).elapsed();
-    eprintln!(
+    crate::logger::profile(format!(
         "[gl-profile +{:>6}ms] {}",
         elapsed.as_millis(),
         label.as_ref()
-    );
+    ));
 }
 
 pub struct ScopeTimer {

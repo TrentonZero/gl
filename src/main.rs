@@ -1,5 +1,6 @@
 mod config;
 mod git;
+mod logger;
 mod perf;
 mod stack;
 mod syntax;
@@ -38,8 +39,17 @@ use watch::{start_repo_watcher, RepoWatcher, WatchMessage};
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn main() -> Result<()> {
+    logger::init();
     let _main_timer = perf::ScopeTimer::new("main");
     let cli = parse_cli_args(env::args().skip(1).collect())?;
+    logger::info(format!(
+        "launching gl version={} repo_arg={}",
+        env!("CARGO_PKG_VERSION"),
+        cli.repo_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<current-dir>".to_string())
+    ));
     if cli.show_help {
         print_help();
         return Ok(());
@@ -59,6 +69,7 @@ fn main() -> Result<()> {
         let _timer = perf::ScopeTimer::new("open_repo");
         open_repo(cli.repo_path)?
     };
+    logger::info(format!("opened repo root={}", repo.root.display()));
     let stack_info = load_initial_stack_info(&repo);
     let mut app = {
         let _timer = perf::ScopeTimer::new("App::new");
@@ -265,13 +276,25 @@ impl App {
         let (watch_event_tx, watch_event_rx) = mpsc::channel();
         let (repo_watcher, watch_notice) = if start_watcher {
             match start_repo_watcher(&repo.root, watch_event_tx.clone()) {
-                Ok(watcher) => (Some(watcher), None),
-                Err(error) => (
-                    None,
-                    Some(format!(
-                        "Filesystem watching unavailable; use R to refresh ({error})"
-                    )),
-                ),
+                Ok(watcher) => {
+                    logger::info(format!(
+                        "started filesystem watcher root={}",
+                        repo.root.display()
+                    ));
+                    (Some(watcher), None)
+                }
+                Err(error) => {
+                    logger::warn(format!(
+                        "filesystem watching unavailable root={} error={error}",
+                        repo.root.display()
+                    ));
+                    (
+                        None,
+                        Some(format!(
+                            "Filesystem watching unavailable; use R to refresh ({error})"
+                        )),
+                    )
+                }
             }
         } else {
             (None, None)
@@ -738,7 +761,8 @@ impl App {
             return;
         }
 
-        let Some(current_branch) = self.selection_anchor_branch(delta).map(ToOwned::to_owned) else {
+        let Some(current_branch) = self.selection_anchor_branch(delta).map(ToOwned::to_owned)
+        else {
             return;
         };
         let current_pos = ordered_branches
@@ -770,7 +794,8 @@ impl App {
             return Some(branch_name);
         }
 
-        let BranchEntry::Header { label, expanded } = self.display_entries.get(self.selected_index)?
+        let BranchEntry::Header { label, expanded } =
+            self.display_entries.get(self.selected_index)?
         else {
             return None;
         };
@@ -834,7 +859,8 @@ impl App {
             return stack_name_for_branch(&self.stack_info, branch_name);
         }
 
-        let BranchEntry::Header { label, expanded } = self.display_entries.get(self.selected_index)?
+        let BranchEntry::Header { label, expanded } =
+            self.display_entries.get(self.selected_index)?
         else {
             return None;
         };
@@ -1036,6 +1062,7 @@ impl App {
 
     fn refresh_repo(&mut self) -> Result<()> {
         let _timer = perf::ScopeTimer::new("App::refresh_repo");
+        logger::info(format!("refreshing repo root={}", self.repo.root.display()));
         self.repo = refresh_repo(&self.repo.root)?;
         self.worktrees = load_worktrees(&self.repo.root).unwrap_or_default();
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
@@ -1132,6 +1159,13 @@ impl App {
                 }
             }
         }
+
+        logger::info(format!(
+            "refresh complete root={} branches={} worktrees={}",
+            self.repo.root.display(),
+            self.repo.branches.len(),
+            self.worktrees.len()
+        ));
 
         Ok(())
     }
@@ -1478,13 +1512,25 @@ impl App {
         self.stack_info = detect_stacks(&self.repo.root, &self.repo, false);
         let (repo_watcher, watch_notice) =
             match start_repo_watcher(&self.repo.root, self._watch_event_tx.clone()) {
-                Ok(watcher) => (Some(watcher), None),
-                Err(error) => (
-                    None,
-                    Some(format!(
-                        "Filesystem watching unavailable; use R to refresh ({error})"
-                    )),
-                ),
+                Ok(watcher) => {
+                    logger::info(format!(
+                        "started filesystem watcher root={}",
+                        self.repo.root.display()
+                    ));
+                    (Some(watcher), None)
+                }
+                Err(error) => {
+                    logger::warn(format!(
+                        "filesystem watching unavailable root={} error={error}",
+                        self.repo.root.display()
+                    ));
+                    (
+                        None,
+                        Some(format!(
+                            "Filesystem watching unavailable; use R to refresh ({error})"
+                        )),
+                    )
+                }
             };
         self._repo_watcher = repo_watcher;
         self.watch_notice = watch_notice;
@@ -1510,6 +1556,7 @@ impl App {
             let _ = self.jump_to_branch(&head_branch_name);
         }
         self.user_notice = Some(format!("Switched to worktree {}", worktree.path.display()));
+        logger::info(format!("switched to worktree {}", worktree.path.display()));
         Ok(())
     }
 
@@ -1590,7 +1637,8 @@ impl App {
             .iter()
             .map(|stack| stack.name.clone())
             .collect();
-        self.expanded_stacks.retain(|stack| valid_stack_names.contains(stack));
+        self.expanded_stacks
+            .retain(|stack| valid_stack_names.contains(stack));
         self.manual_stack_states
             .retain(|stack, _| valid_stack_names.contains(stack));
         if self
@@ -2202,7 +2250,11 @@ fn ordered_branch_names(repo: &RepoState, stack_info: &StackInfo) -> Vec<String>
 
     for stack in &stack_info.stacks {
         for branch_name in &stack.branches {
-            if repo.branches.iter().any(|branch| branch.name == *branch_name) {
+            if repo
+                .branches
+                .iter()
+                .any(|branch| branch.name == *branch_name)
+            {
                 branches.push(branch_name.clone());
                 used_branches.insert(branch_name.clone());
             }
@@ -2210,7 +2262,10 @@ fn ordered_branch_names(repo: &RepoState, stack_info: &StackInfo) -> Vec<String>
     }
 
     for branch_name in &stack_info.standalone {
-        if repo.branches.iter().any(|branch| branch.name == *branch_name)
+        if repo
+            .branches
+            .iter()
+            .any(|branch| branch.name == *branch_name)
             && !used_branches.contains(branch_name)
         {
             branches.push(branch_name.clone());
@@ -2887,11 +2942,10 @@ mod tests {
         app.move_selection(1);
         assert_eq!(app.selected_branch_name(), Some("main"));
         assert!(!app.expanded_stacks.contains("stack B"));
-        assert!(
-            app.display_entries
-                .iter()
-                .all(|entry| entry.is_header() || entry.branch_name() != "b1")
-        );
+        assert!(app
+            .display_entries
+            .iter()
+            .all(|entry| entry.is_header() || entry.branch_name() != "b1"));
     }
 
     #[test]
@@ -2954,35 +3008,29 @@ mod tests {
             .unwrap();
 
         app.fold_selected_stack_manually();
-        assert_eq!(
-            app.manual_stack_states.get("stack A").copied(),
-            Some(false)
-        );
-        assert!(
-            app.display_entries
-                .iter()
-                .all(|entry| entry.is_header() || entry.branch_name() != "a1")
-        );
+        assert_eq!(app.manual_stack_states.get("stack A").copied(), Some(false));
+        assert!(app
+            .display_entries
+            .iter()
+            .all(|entry| entry.is_header() || entry.branch_name() != "a1"));
 
         app.move_selection(1);
 
         assert_eq!(app.selected_branch_name(), Some("b1"));
         assert!(app.expanded_stacks.contains("stack B"));
-        assert!(
-            app.display_entries
-                .iter()
-                .all(|entry| entry.is_header() || entry.branch_name() != "a1")
-        );
+        assert!(app
+            .display_entries
+            .iter()
+            .all(|entry| entry.is_header() || entry.branch_name() != "a1"));
 
         app.move_selection(1);
 
         assert_eq!(app.selected_branch_name(), Some("main"));
         assert!(!app.expanded_stacks.contains("stack B"));
-        assert!(
-            app.display_entries
-                .iter()
-                .all(|entry| entry.is_header() || entry.branch_name() != "b1")
-        );
+        assert!(app
+            .display_entries
+            .iter()
+            .all(|entry| entry.is_header() || entry.branch_name() != "b1"));
     }
 
     #[test]
@@ -3009,7 +3057,9 @@ mod tests {
         let stack_b_header = app
             .display_entries
             .iter()
-            .position(|entry| matches!(entry, BranchEntry::Header { label, .. } if label == "stack B"))
+            .position(
+                |entry| matches!(entry, BranchEntry::Header { label, .. } if label == "stack B"),
+            )
             .unwrap();
         app.selected_index = stack_b_header;
 
@@ -3021,11 +3071,10 @@ mod tests {
 
         assert_eq!(app.selected_branch_name(), Some("main"));
         assert!(app.expanded_stacks.contains("stack B"));
-        assert!(
-            app.display_entries
-                .iter()
-                .any(|entry| !entry.is_header() && entry.branch_name() == "b1")
-        );
+        assert!(app
+            .display_entries
+            .iter()
+            .any(|entry| !entry.is_header() && entry.branch_name() == "b1"));
     }
 
     #[test]
@@ -3124,11 +3173,10 @@ mod tests {
         app.jump_stack_group(-1);
 
         assert!(app.expanded_stacks.contains("stack B"));
-        assert!(
-            app.display_entries
-                .iter()
-                .any(|entry| !entry.is_header() && entry.branch_name() == "b1")
-        );
+        assert!(app
+            .display_entries
+            .iter()
+            .any(|entry| !entry.is_header() && entry.branch_name() == "b1"));
         assert!(matches!(
             app.display_entries.get(app.selected_index),
             Some(BranchEntry::Header { label, expanded: Some(false) }) if label == "stack A"
@@ -3333,12 +3381,8 @@ mod tests {
             stale_branches: std::collections::HashSet::new(),
             detection_status: StackDetectionStatus::Ready,
         };
-        let entries = build_display_entries(
-            &repo,
-            &stacks,
-            &[],
-            &HashSet::from(["stack".to_string()]),
-        );
+        let entries =
+            build_display_entries(&repo, &stacks, &[], &HashSet::from(["stack".to_string()]));
 
         let targets = diff_preload_targets(&repo, &stacks, &entries);
         let names: Vec<_> = targets.iter().map(|branch| branch.name.as_str()).collect();

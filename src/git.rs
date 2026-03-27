@@ -1,4 +1,4 @@
-use crate::perf;
+use crate::{logger, perf};
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::hash_map::Entry,
@@ -854,6 +854,12 @@ fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
     let output = run_git_command(root, &args)?;
 
     if !output.status.success() {
+        logger::warn(format!(
+            "git {:?} failed in {}: {}",
+            args,
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
         return Err(anyhow!(
             "git {:?} failed: {}",
             args,
@@ -870,6 +876,12 @@ fn git_vec(root: &Path, args: &[&str]) -> Result<String> {
     let output = run_git_command(root, args)?;
 
     if !output.status.success() {
+        logger::warn(format!(
+            "git {:?} failed in {}: {}",
+            args,
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
         return Err(anyhow!(
             "git {:?} failed: {}",
             args,
@@ -895,11 +907,18 @@ fn run_git_command(root: &Path, args: &[&str]) -> Result<Output> {
             Ok(output) => return Ok(output),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
+                logger::warn(format!(
+                    "failed to run git {:?} in {}: {}",
+                    args,
+                    root.display(),
+                    error
+                ));
                 return Err(error).with_context(|| format!("failed to run git {:?}", args));
             }
         }
     }
 
+    logger::error(format!("failed to find git executable for {:?}", args));
     Err(anyhow!("failed to find git executable"))
         .with_context(|| format!("failed to run git {:?}", args))
 }
