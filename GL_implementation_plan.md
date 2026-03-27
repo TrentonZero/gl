@@ -25,6 +25,7 @@ Implemented today:
 - open a working tree status view for the checked-out branch
 - open a commit breakdown overlay and per-commit diff inspection
 - open a first-parent local commit graph view and jump from graph entries into branch detail
+- enumerate repo worktrees, tag checked-out branches, and switch the active viewing context
 - syntax highlight diff content with `syntect`
 - search within the diff
 - toggle between unified and side-by-side diff layouts
@@ -35,12 +36,6 @@ Implemented today:
 - support `--help`, `--version`, and a positional repo path
 - read `chrome`, `diff_view`, `ignore_whitespace`, `color_scheme`, `keybindings`, and `worktree_path_defaults` from `~/.config/gl/config.toml`
 - emit optional profiling logs via `GL_PROFILE`
-
-Not implemented today:
-
-- worktree manager
-
----
 
 ## Phase Status
 
@@ -128,7 +123,15 @@ Subphase 5a: Diff Preload Cache
 
 ### Phase 6: Worktree Support
 
-**Status:** Not started
+**Status:** Complete
+
+Delivered:
+
+- `git worktree list --porcelain` parsing with per-worktree branch, active-context, and clean/dirty status
+- branch-list worktree tags for branches that are checked out in other worktrees
+- worktree manager view opened with `3` or `w` from the branch list
+- `Enter` in the worktree manager switches GL's active repo context to the selected worktree and refreshes watchers/diffs for that root
+- behavior tests covering worktree parsing, branch tagging, and active worktree switching
 
 ### Phase 7: Status View
 
@@ -203,23 +206,6 @@ Delivered:
 - bare-repo rejection with a direct working-tree-oriented error message
 - decent empty/error handling for common repo inspection failures
 - profiling hooks for performance investigation
-
----
-
-## Recommended Next Steps
-
-The current implementation has already delivered the core product loop, so the remaining work should prioritize depth first and breadth later.
-
-Recommended implementation order for the remaining phases:
-
-1. `Phase 6: Worktree Support`
-   Still the broadest feature, so it should wait until the viewer workflow is deeper.
-
-Short-term tightening work that can happen alongside the next phase:
-
-- make diff viewport sizing dynamic instead of relying on fixed assumptions
-- improve search UX feedback when there are zero matches
-- add tests around branch base selection and diff behavior in stacked branches
 
 ---
 
