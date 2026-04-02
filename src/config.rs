@@ -287,7 +287,10 @@ mod tests {
     fn resolve_config_path_falls_back_to_home_config() {
         let path = resolve_config_path_from_values(None, Some(PathBuf::from("/home/test")));
 
-        assert_eq!(path, Some(PathBuf::from("/home/test/.config/gl/config.toml")));
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/home/test/.config/gl/config.toml"))
+        );
     }
 
     #[test]

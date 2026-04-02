@@ -137,7 +137,7 @@ pub fn refresh_repo(root: &Path) -> Result<RepoState> {
 
     let mut branches = Vec::with_capacity(raw_branches.len());
     for raw in raw_branches {
-        let base_ref = raw.upstream.clone().or_else(|| default_base.clone());
+        let base_ref = default_base.clone().or_else(|| raw.upstream.clone());
 
         branches.push(BranchInfo {
             name: raw.name,
@@ -513,6 +513,12 @@ fn local_branches(root: &Path) -> Result<Vec<RawBranch>> {
 
 fn infer_default_base(root: &Path, branches: &[RawBranch]) -> Result<Option<String>> {
     let _timer = perf::ScopeTimer::new(format!("infer_default_base branches={}", branches.len()));
+    for candidate in ["main", "master"] {
+        if branches.iter().any(|branch| branch.name == candidate) {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+
     if let Ok(remote_head) = git(
         root,
         ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -525,7 +531,7 @@ fn infer_default_base(root: &Path, branches: &[RawBranch]) -> Result<Option<Stri
         }
     }
 
-    for candidate in ["main", "master", "trunk"] {
+    for candidate in ["trunk"] {
         if branches.iter().any(|branch| branch.name == candidate) {
             return Ok(Some(candidate.to_string()));
         }
@@ -1399,6 +1405,73 @@ index 1111..2222 100644
             .iter()
             .any(|line| line.text.contains("identical")));
         assert!(ignored.ignore_whitespace);
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn refresh_repo_prefers_main_over_branch_upstream_for_default_diff_base() {
+        let repo_root = unique_temp_dir("default-base-prefers-main");
+        fs::create_dir_all(&repo_root).unwrap();
+        run_git(&repo_root, &["init", "-b", "main"]);
+        run_git(&repo_root, &["config", "user.name", "GL Test"]);
+        run_git(&repo_root, &["config", "user.email", "gl@example.com"]);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").unwrap();
+        run_git(&repo_root, &["add", "notes.txt"]);
+        run_git(&repo_root, &["commit", "-m", "initial"]);
+
+        run_git(&repo_root, &["checkout", "-b", "feature"]);
+        fs::write(repo_root.join("notes.txt"), "base\nfeature\n").unwrap();
+        run_git(&repo_root, &["commit", "-am", "feature change"]);
+
+        run_git(
+            &repo_root,
+            &["remote", "add", "origin", repo_root.to_str().unwrap()],
+        );
+        run_git(
+            &repo_root,
+            &["update-ref", "refs/remotes/origin/HEAD", "refs/heads/main"],
+        );
+        run_git(
+            &repo_root,
+            &[
+                "update-ref",
+                "refs/remotes/origin/feature",
+                "refs/heads/feature",
+            ],
+        );
+        run_git(
+            &repo_root,
+            &["branch", "--set-upstream-to=origin/feature", "feature"],
+        );
+
+        let repo = refresh_repo(&repo_root).unwrap();
+        let branch = repo
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature")
+            .unwrap();
+
+        assert_eq!(branch.upstream.as_deref(), Some("origin/feature"));
+        assert_eq!(branch.base_ref.as_deref(), Some("main"));
+
+        let diff = load_branch_diff(
+            &repo_root,
+            branch,
+            DiffOptions {
+                ignore_whitespace: false,
+            },
+        )
+        .unwrap();
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| line.text.contains("notes.txt")));
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| matches!(line.kind, DiffLineKind::Add)));
 
         fs::remove_dir_all(repo_root).unwrap();
     }

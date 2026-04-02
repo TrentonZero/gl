@@ -199,7 +199,11 @@ pub(crate) fn ordered_branch_names(repo: &RepoState, stack_info: &StackInfo) -> 
 
     for stack in &stack_info.stacks {
         for branch_name in &stack.branches {
-            if repo.branches.iter().any(|branch| branch.name == *branch_name) {
+            if repo
+                .branches
+                .iter()
+                .any(|branch| branch.name == *branch_name)
+            {
                 branches.push(branch_name.clone());
                 used_branches.insert(branch_name.clone());
             }
@@ -207,7 +211,10 @@ pub(crate) fn ordered_branch_names(repo: &RepoState, stack_info: &StackInfo) -> 
     }
 
     for branch_name in &stack_info.standalone {
-        if repo.branches.iter().any(|branch| branch.name == *branch_name)
+        if repo
+            .branches
+            .iter()
+            .any(|branch| branch.name == *branch_name)
             && !used_branches.contains(branch_name)
         {
             branches.push(branch_name.clone());

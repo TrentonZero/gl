@@ -138,6 +138,7 @@ Completed:
 - Reduced the `src/ui.rs` help-bar renderer input surface to eliminate the remaining `clippy::too_many_arguments` warning.
 - Updated this plan to reflect the completed cleanup phases.
 - Moved worktree discovery and per-worktree dirty-state loading off the startup critical path so the initial branch list can render before worktree metadata backfills.
+- Corrected standalone branch diff baselines to prefer local `main`/`master` over branch upstreams, with regression coverage for tracked non-stack branches.
 
 **Goal:** Close out residual cleanup debt introduced or exposed by earlier phases.
 

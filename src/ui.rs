@@ -302,18 +302,14 @@ fn branch_list_help(keybindings: &KeyBindings) -> String {
 fn branch_list_detail_help(keybindings: &KeyBindings) -> String {
     format!(
         "j/k move  J/K stacks  h/l fold  Enter open  {} status  Esc close  {} quit  {} help",
-        keybindings.status_view,
-        keybindings.quit,
-        keybindings.help,
+        keybindings.status_view, keybindings.quit, keybindings.help,
     )
 }
 
 fn stack_view_help(keybindings: &KeyBindings) -> String {
     format!(
         "j/k move  J/K stacks  h/l fold  Enter open diff  {} stack  Esc close  {} refresh  {} quit",
-        keybindings.stack_view,
-        keybindings.refresh,
-        keybindings.quit,
+        keybindings.stack_view, keybindings.refresh, keybindings.quit,
     )
 }
 
@@ -1203,9 +1199,9 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect, config: &AppConfig) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(help_overlay_lines(&config.keybindings))
-        .block(Block::default().title("Help").borders(Borders::ALL))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: false }),
+            .block(Block::default().title("Help").borders(Borders::ALL))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }
@@ -1607,7 +1603,14 @@ mod tests {
             status_view: 'z',
             graph_view: '9',
         };
-        let line = help_bar_line(&keybindings, false, None, FocusedPane::BranchList, None, None);
+        let line = help_bar_line(
+            &keybindings,
+            false,
+            None,
+            FocusedPane::BranchList,
+            None,
+            None,
+        );
         let text: String = line
             .spans
             .iter()

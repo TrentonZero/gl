@@ -32,9 +32,7 @@ use std::{
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
-use ui::{
-    draw, BranchEntry, DrawState, FocusedPane, GraphView, StackView, WorktreeView,
-};
+use ui::{draw, BranchEntry, DrawState, FocusedPane, GraphView, StackView, WorktreeView};
 use view_state::{
     branch_for_diff, build_display_entries, build_stack_view, diff_preload_targets,
     initial_expanded_stacks, ordered_branch_names, stack_contains_head, stack_name_for_branch,
@@ -3116,17 +3114,14 @@ mod tests {
             .unwrap();
 
         assert!(app.apply_pending_worktree_updates());
-        let label = app
-            .display_entries
-            .iter()
-            .find_map(|entry| match entry {
-                BranchEntry::Branch {
-                    branch_name,
-                    worktree_label,
-                    ..
-                } if branch_name == "a1" => worktree_label.as_deref(),
-                _ => None,
-            });
+        let label = app.display_entries.iter().find_map(|entry| match entry {
+            BranchEntry::Branch {
+                branch_name,
+                worktree_label,
+                ..
+            } if branch_name == "a1" => worktree_label.as_deref(),
+            _ => None,
+        });
         assert_eq!(label, Some("wt-a1"));
     }
 
