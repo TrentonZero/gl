@@ -32,7 +32,7 @@ use std::{
     time::Duration,
 };
 use syntax::SyntaxHighlighter;
-use ui::{draw, BranchEntry, DrawState, FocusedPane, GraphView, StackView, WorktreeView};
+use ui::{draw, BranchEntry, DrawState, FocusedPane, GraphView, InputBar, StackView, WorktreeView};
 use view_state::{
     branch_for_diff, build_display_entries, build_stack_view, diff_preload_targets,
     initial_expanded_stacks, ordered_branch_names, stack_contains_head, stack_name_for_branch,
@@ -115,6 +115,12 @@ enum BranchDetailDiffMode {
     Commit { selected_index: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchTarget {
+    BranchList,
+    Diff,
+}
+
 #[derive(Debug, Clone)]
 struct BranchDetailState {
     branch_name: String,
@@ -143,7 +149,7 @@ struct App {
     diff_scroll: usize,
     show_help: bool,
     focus: FocusedPane,
-    search_mode: bool,
+    search_target: Option<SearchTarget>,
     search_input: String,
     search_matches: Vec<usize>,
     search_cursor: usize,
@@ -242,7 +248,7 @@ impl App {
             diff_scroll: 0,
             show_help: false,
             focus: FocusedPane::BranchList,
-            search_mode: false,
+            search_target: None,
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
@@ -353,13 +359,13 @@ impl App {
                                 .branch_detail
                                 .as_ref()
                                 .and_then(|detail| detail.info_overlay.as_deref()),
-                            search: if self.search_mode {
+                            search: if self.search_target == Some(SearchTarget::Diff) {
                                 Some(self.search_input.as_str())
                             } else {
                                 None
                             },
                             notice: self.current_notice(),
-                            command_input: self.command_mode.then_some(self.command_input.as_str()),
+                            input_bar: self.active_input_bar(),
                         },
                     );
                 })?;
@@ -386,7 +392,7 @@ impl App {
                 continue;
             }
 
-            if self.search_mode {
+            if self.search_target.is_some() {
                 self.handle_search_input(key);
                 needs_redraw = true;
                 continue;
@@ -473,6 +479,7 @@ impl App {
                 self.open_selected_status()?
             }
             KeyCode::Char('w') if self.detail_kind.is_none() => self.toggle_worktree_view()?,
+            KeyCode::Char('/') => self.open_search(SearchTarget::BranchList),
             KeyCode::Esc if self.show_stack_view => self.show_stack_view = false,
             KeyCode::Esc if self.show_worktree_view => self.show_worktree_view = false,
             KeyCode::Tab if self.show_graph_view => {
@@ -576,8 +583,7 @@ impl App {
                 self.scroll_diff(-(visible as isize / 2))
             }
             KeyCode::Char('/') => {
-                self.search_mode = true;
-                self.search_input.clear();
+                self.open_search(SearchTarget::Diff);
             }
             KeyCode::Char('v') => self.toggle_diff_view(),
             KeyCode::Char('w') => self.toggle_whitespace_mode()?,
@@ -603,15 +609,35 @@ impl App {
     }
 
     fn handle_search_input(&mut self, key: KeyEvent) {
+        let Some(target) = self.search_target else {
+            return;
+        };
         match key.code {
             KeyCode::Esc => {
-                self.search_mode = false;
+                self.search_target = None;
                 self.search_input.clear();
             }
             KeyCode::Enter => {
-                self.search_mode = false;
-                self.refresh_search_matches();
-                self.advance_match(1);
+                self.search_target = None;
+                match target {
+                    SearchTarget::Diff => {
+                        self.refresh_search_matches();
+                        self.advance_match(1);
+                    }
+                    SearchTarget::BranchList => {
+                        let term = self.search_input.trim().to_string();
+                        if term.is_empty() {
+                            self.user_notice = Some("Search term cannot be empty.".to_string());
+                        } else if self.search_branch_list(&term) {
+                            self.user_notice =
+                                Some(format!("Matched branch search `{term}`."));
+                        } else {
+                            self.user_notice =
+                                Some(format!("No branches contained `{term}`."));
+                        }
+                        self.search_input.clear();
+                    }
+                }
             }
             KeyCode::Backspace => {
                 self.search_input.pop();
@@ -943,6 +969,7 @@ impl App {
         self.show_stack_view = false;
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
+        self.search_target = None;
         self.search_input.clear();
         self.search_matches.clear();
         self.search_cursor = 0;
@@ -974,6 +1001,7 @@ impl App {
         self.show_stack_view = false;
         self.diff_scroll = 0;
         self.focus = FocusedPane::Diff;
+        self.search_target = None;
         self.search_input.clear();
         self.search_matches.clear();
         self.search_cursor = 0;
@@ -987,6 +1015,7 @@ impl App {
         self.highlighted_diff = None;
         self.diff_scroll = 0;
         self.focus = FocusedPane::BranchList;
+        self.search_target = None;
         self.search_input.clear();
         self.search_matches.clear();
         self.search_cursor = 0;
@@ -1577,6 +1606,7 @@ impl App {
 
     fn jump_to_branch(&mut self, branch_name: &str) -> bool {
         self.expand_stack_for_branch(branch_name);
+        self.rebuild_display_entries_preserve_selection(Some(branch_name));
         let Some(index) = self
             .display_entries
             .iter()
@@ -1593,15 +1623,39 @@ impl App {
 
     fn search_branch_list(&mut self, term: &str) -> bool {
         let term = term.to_lowercase();
-        let Some(index) = self.display_entries.iter().position(|entry| {
-            !entry.is_header() && entry.branch_name().to_lowercase().contains(&term)
-        }) else {
+        let Some(branch_name) = ordered_branch_names(&self.repo, &self.stack_info)
+            .into_iter()
+            .find(|branch_name| branch_name.to_lowercase().contains(&term))
+        else {
             return false;
         };
-        self.selected_index = index;
-        self.show_graph_view = false;
-        self.focus = FocusedPane::BranchList;
-        true
+        self.jump_to_branch(&branch_name)
+    }
+
+    fn open_search(&mut self, target: SearchTarget) {
+        self.search_target = Some(target);
+        self.search_input.clear();
+        self.user_notice = None;
+    }
+
+    fn active_input_bar(&self) -> Option<InputBar<'_>> {
+        if let Some(target) = self.search_target {
+            let title = match target {
+                SearchTarget::BranchList => "Branch Search",
+                SearchTarget::Diff => "Search",
+            };
+            return Some(InputBar {
+                title,
+                prompt: '/',
+                input: self.search_input.as_str(),
+            });
+        }
+
+        self.command_mode.then_some(InputBar {
+            title: "Command",
+            prompt: ':',
+            input: self.command_input.as_str(),
+        })
     }
 
     fn sync_expanded_stacks(&mut self, selected_branch: Option<&str>) {
@@ -1745,6 +1799,7 @@ impl App {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)
             .context("failed to leave alternate screen")?;
         terminal.show_cursor().ok();
+        self.search_target = None;
         mem::take(&mut self.search_input);
         Ok(())
     }
@@ -2326,7 +2381,7 @@ mod tests {
             diff_scroll: 0,
             show_help: false,
             focus: FocusedPane::BranchList,
-            search_mode: false,
+            search_target: None,
             search_input: String::new(),
             search_matches: Vec::new(),
             search_cursor: 0,
@@ -3082,6 +3137,73 @@ mod tests {
             .user_notice
             .as_deref()
             .is_some_and(|message| message.contains("Matched branch search")));
+    }
+
+    #[test]
+    fn slash_opens_branch_search_and_enter_selects_first_match() {
+        let mut app = make_test_app(make_test_entries());
+
+        app.handle_branch_list_keys(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.search_target, Some(SearchTarget::BranchList));
+        assert_eq!(
+            app.active_input_bar(),
+            Some(InputBar {
+                title: "Branch Search",
+                prompt: '/',
+                input: "",
+            })
+        );
+
+        app.handle_search_input(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        app.handle_search_input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+        assert!(app.search_target.is_none());
+        assert!(app
+            .user_notice
+            .as_deref()
+            .is_some_and(|message| message.contains("Matched branch search")));
+    }
+
+    #[test]
+    fn branch_search_expands_folded_stack_to_select_match() {
+        let mut repo = make_repo(&["a1", "a2", "b1", "main"]);
+        repo.branches[3].is_head = true;
+        let stack_info = StackInfo {
+            stacks: vec![
+                Stack {
+                    name: "stack A".into(),
+                    branches: vec!["a1".into(), "a2".into()],
+                },
+                Stack {
+                    name: "stack B".into(),
+                    branches: vec!["b1".into()],
+                },
+            ],
+            standalone: vec!["main".into()],
+            branch_to_parent: HashMap::new(),
+            stale_branches: std::collections::HashSet::new(),
+            detection_status: StackDetectionStatus::Ready,
+        };
+        let mut app = App::new_for_test(AppConfig::default(), repo, stack_info);
+
+        assert!(app
+            .display_entries
+            .iter()
+            .all(|entry| entry.is_header() || entry.branch_name() != "b1"));
+
+        app.handle_branch_list_keys(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_search_input(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        app.handle_search_input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.selected_branch_name(), Some("b1"));
+        assert!(app.expanded_stacks.contains("stack B"));
+        assert!(app
+            .display_entries
+            .iter()
+            .any(|entry| !entry.is_header() && entry.branch_name() == "b1"));
     }
 
     #[test]

@@ -151,3 +151,27 @@ Completed:
 5. Update this plan with completed status notes once all phases land.
 
 **Deliverable:** A smaller, more coherent codebase with accurate docs and clean build/test output.
+
+---
+
+## Phase 6: Branch List Search
+
+**Status:** Complete
+
+Completed:
+
+- Added `/` branch-list search that opens a bottom input bar and jumps to the first matching branch on `Enter`.
+- Reused the same bottom input bar for `:` commands and diff search so active input modes share one presentation style.
+- Added behavior-focused tests covering slash search entry and searching into a folded stack.
+
+**Goal:** Reduce friction when navigating long branch lists by making branch lookup fast and visible.
+
+**Tasks:**
+
+1. Add a branch-list search entrypoint on `/` without disturbing existing diff search behavior.
+2. Present active input in a bottom command-style bar rather than a centered popup.
+3. Ensure branch search can reach matching branches inside folded stacks.
+4. Add regression tests that prove the visible branch-selection behavior.
+5. Keep `cargo build` and `cargo test` clean after the change.
+
+**Deliverable:** Users can type `/` from the branch list, search for a branch name, and jump to it without manually scrolling.

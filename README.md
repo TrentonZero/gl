@@ -55,7 +55,7 @@ If something is broken, feel free to report an issue, but I don't promise any gr
   - branch-list worktree tags
   - active-context switching with `Enter`
   - asynchronous metadata loading after the first frame so startup does not wait on worktree scans
-- Command overlay with `:q`, `:branch <name>`, and `:search <term>`
+- Bottom command bar with `:q`, `:branch <name>`, and `:search <term>`
 - Manual refresh with `R` as a fallback when filesystem watching is unavailable
 - Optional top and bottom chrome via `~/.config/gl/config.toml`
 - File-backed application logs for normal runs, with optional profiling when `GL_PROFILE=1`
@@ -132,7 +132,8 @@ Branch list:
 - `Ctrl-d` / `Ctrl-u`: move faster through the list
 - `4`: open or close graph view
 - `3` or `w`: open or close the worktree manager
-- `:`: open command overlay
+- `/`: open branch search
+- `:`: open command bar
 - `Enter`: open selected branch diff
 - `S`: open the checked-out branch's working tree status
 - `s`: open or close the selected branch's stack view

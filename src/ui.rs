@@ -103,7 +103,14 @@ pub struct DrawState<'a> {
     pub info_overlay: Option<&'a [String]>,
     pub search: Option<&'a str>,
     pub notice: Option<&'a str>,
-    pub command_input: Option<&'a str>,
+    pub input_bar: Option<InputBar<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputBar<'a> {
+    pub title: &'a str,
+    pub prompt: char,
+    pub input: &'a str,
 }
 
 struct BodyState<'a> {
@@ -197,8 +204,8 @@ pub fn draw(frame: &mut Frame<'_>, state: DrawState<'_>) {
         draw_help_overlay(frame, frame_area, state.config);
     }
 
-    if let Some(command_input) = state.command_input {
-        draw_command_overlay(frame, frame_area, command_input);
+    if let Some(input_bar) = state.input_bar {
+        draw_input_bar(frame, frame_area, input_bar);
     }
 }
 
@@ -290,7 +297,7 @@ fn help_bar_line(
 
 fn branch_list_help(keybindings: &KeyBindings) -> String {
     format!(
-        "j/k move  J/K stacks  h/l fold  Enter open  {} status  {} stack  {} refresh  {} quit  {} help",
+        "j/k move  J/K stacks  h/l fold  / search  Enter open  {} status  {} stack  {} refresh  {} quit  {} help",
         keybindings.status_view,
         keybindings.stack_view,
         keybindings.refresh,
@@ -301,7 +308,7 @@ fn branch_list_help(keybindings: &KeyBindings) -> String {
 
 fn branch_list_detail_help(keybindings: &KeyBindings) -> String {
     format!(
-        "j/k move  J/K stacks  h/l fold  Enter open  {} status  Esc close  {} quit  {} help",
+        "j/k move  J/K stacks  h/l fold  / search  Enter open  {} status  Esc close  {} quit  {} help",
         keybindings.status_view, keybindings.quit, keybindings.help,
     )
 }
@@ -339,7 +346,7 @@ fn help_overlay_lines(keybindings: &KeyBindings) -> Vec<Line<'static>> {
             keybindings.command,
         )),
         Line::from(format!(
-            "Branches: j/k move, J/K jump stacks, h/l fold or unfold, {} stack",
+            "Branches: j/k move, J/K jump stacks, h/l fold or unfold, / search, {} stack",
             keybindings.stack_view,
         )),
         Line::from(format!(
@@ -1206,12 +1213,22 @@ fn draw_help_overlay(frame: &mut Frame<'_>, area: Rect, config: &AppConfig) {
     );
 }
 
-fn draw_command_overlay(frame: &mut Frame<'_>, area: Rect, command_input: &str) {
-    let popup = centered_rect(72, 3, area);
+fn draw_input_bar(frame: &mut Frame<'_>, area: Rect, input_bar: InputBar<'_>) {
+    let width = area.width.saturating_sub(4).min(72).max(16);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(3);
+    let popup = Rect::new(x, y, width, 3.min(area.height));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(Line::from(format!(":{}", command_input)))
-            .block(Block::default().title("Command").borders(Borders::ALL)),
+        Paragraph::new(Line::from(format!(
+            "{}{}",
+            input_bar.prompt, input_bar.input
+        )))
+        .block(
+            Block::default()
+                .title(input_bar.title)
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -1571,6 +1588,7 @@ mod tests {
             .collect();
         assert!(text.contains("S status"));
         assert!(text.contains("h/l fold"));
+        assert!(text.contains("/ search"));
     }
 
     #[test]
@@ -1621,6 +1639,7 @@ mod tests {
         assert!(text.contains("r refresh"));
         assert!(text.contains("x quit"));
         assert!(text.contains("H help"));
+        assert!(text.contains("/ search"));
     }
 
     #[test]
@@ -1646,6 +1665,7 @@ mod tests {
         assert!(text.contains("; command"));
         assert!(text.contains("t stack"));
         assert!(text.contains("z status"));
+        assert!(text.contains("/ search"));
     }
 
     #[test]
